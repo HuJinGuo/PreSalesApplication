@@ -1,0 +1,56 @@
+:root {
+  --app-bg: #f3f6fc;
+  --page-bg: #f3f6fc;
+  --panel-bg: #ffffff;
+  --brand: #1a73e8;
+  --brand-2: #7baaf7;
+  --text: #1f2a3d;
+  --muted: #6d7b91;
+  --border: #e6ebf4;
+}
+
+body {
+  margin: 0;
+  font-family: "Google Sans", "Avenir Next", "Helvetica Neue", "PingFang SC", sans-serif;
+  color: var(--text);
+  background: var(--page-bg);
+}
+
+.page {
+  padding: 0;
+}
+
+.card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.header-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2a3d;
+}
+
+.el-button--primary {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.el-table {
+  --el-table-header-bg-color: #f8faff;
+  --el-table-header-text-color: #516078;
+  --el-table-border-color: var(--border);
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  box-shadow: 0 0 0 1px var(--border) inset;
+}
+
+.el-dialog {
+  border-radius: 14px;
+}
