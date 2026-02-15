@@ -60,7 +60,7 @@ public class DocxExporter {
           } else {
             XWPFParagraph body = doc.createParagraph();
             XWPFRun bodyRun = body.createRun();
-            bodyRun.setText(block.getText() == null ? "" : block.getText());
+            writeMultiline(bodyRun, block.getText() == null ? "" : block.getText());
           }
         }
       }
@@ -128,5 +128,18 @@ public class DocxExporter {
       return ParagraphAlignment.RIGHT;
     }
     return ParagraphAlignment.LEFT;
+  }
+
+  private void writeMultiline(XWPFRun run, String text) {
+    if (text == null || text.isBlank()) {
+      run.setText("");
+      return;
+    }
+    String[] lines = text.split("\\R", -1);
+    run.setText(lines[0]);
+    for (int i = 1; i < lines.length; i++) {
+      run.addBreak();
+      run.setText(lines[i]);
+    }
   }
 }

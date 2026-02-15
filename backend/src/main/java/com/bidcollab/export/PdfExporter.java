@@ -4,6 +4,7 @@ import com.lowagie.text.Document;
 import com.lowagie.text.Font;
 import com.lowagie.text.Image;
 import com.lowagie.text.Paragraph;
+import com.lowagie.text.pdf.BaseFont;
 import com.lowagie.text.pdf.PdfWriter;
 import java.io.FileOutputStream;
 import java.nio.file.Files;
@@ -24,9 +25,10 @@ public class PdfExporter {
       PdfWriter.getInstance(pdf, out);
       pdf.open();
 
-      Font titleFont = new Font(Font.HELVETICA, 16, Font.BOLD);
-      Font headingFont = new Font(Font.HELVETICA, 12, Font.BOLD);
-      Font bodyFont = new Font(Font.HELVETICA, 10, Font.NORMAL);
+      BaseFont baseFont = BaseFont.createFont("STSong-Light", "UniGB-UCS2-H", BaseFont.NOT_EMBEDDED);
+      Font titleFont = new Font(baseFont, 16, Font.BOLD);
+      Font headingFont = new Font(baseFont, 12, Font.BOLD);
+      Font bodyFont = new Font(baseFont, 10, Font.NORMAL);
 
       pdf.add(new Paragraph(title, titleFont));
       pdf.add(new Paragraph("目录", headingFont));
@@ -71,7 +73,7 @@ public class PdfExporter {
     }
     pdf.add(image);
     if (ref.getCaption() != null && !ref.getCaption().isBlank()) {
-      Font caption = new Font(Font.HELVETICA, 9, Font.ITALIC);
+      Font caption = new Font(bodyFont.getBaseFont(), 9, Font.ITALIC);
       Paragraph cp = new Paragraph(ref.getCaption(), caption);
       cp.setAlignment(image.getAlignment());
       pdf.add(cp);

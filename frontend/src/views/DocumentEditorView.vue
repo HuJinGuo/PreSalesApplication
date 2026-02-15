@@ -25,13 +25,53 @@
           highlight-current
           default-expand-all
           @node-click="handleSelect"
-        />
+        >
+          <template #default="{ data }">
+            <div class="tree-node-row">
+              <span class="tree-node-title">{{ data.title }}</span>
+              <div class="tree-node-actions" @click.stop>
+                <el-tooltip content="新增子章节" placement="top">
+                  <el-button link type="primary" size="small" :icon="CirclePlus" @click="createChildSection(data)" />
+                </el-tooltip>
+                <el-tooltip content="新增同级章节" placement="top">
+                  <el-button link type="primary" size="small" :icon="Operation" @click="createSiblingSection(data)" />
+                </el-tooltip>
+                <el-tooltip content="删除章节" placement="top">
+                  <el-button link type="danger" size="small" :icon="Delete" @click="deleteSectionNode(data)" />
+                </el-tooltip>
+              </div>
+            </div>
+          </template>
+        </el-tree>
       </div>
 
       <div class="card content" v-if="currentSection">
         <div class="content-header">
           <div>
-            <div class="header-title">{{ currentSection.title }}</div>
+            <div class="center-title-row">
+              <el-input
+                v-if="centerRenameEditing"
+                ref="centerRenameInputRef"
+                v-model="centerRenameTitle"
+                size="small"
+                class="center-title-input"
+                @keyup.enter="commitCenterRename"
+                @keyup.esc="cancelCenterRename"
+                @blur="commitCenterRename"
+              />
+              <div v-else class="header-title center-title" @click="startCenterRename">
+                {{ currentSection.title }}
+              </div>
+              <el-button
+                v-if="!centerRenameEditing"
+                link
+                type="primary"
+                size="small"
+                @click="startCenterRename"
+              >
+                重命名
+              </el-button>
+            </div>
             <div class="status">
               状态：{{ currentSection.status }} | 字数：{{ textLength }} | {{ autosaveText }}
             </div>
@@ -43,7 +83,7 @@
           </div>
         </div>
 
-        <div ref="editorShellRef" class="editor-shell" @click="handleEditorShellClick" @mousedown="handleEditorShellMouseDown">
+        <div ref="editorShellRef" class="editor-shell" @click="handleEditorShellClick">
           <Toolbar class="editor-toolbar" :editor="editorRef" :default-config="toolbarConfig" mode="default" />
           <Editor
             v-model="content"
@@ -54,7 +94,7 @@
           />
         </div>
         <div class="editor-hint">
-          支持：标题、表格、列表、图片上传/粘贴；图片可在编辑区右边缘拖拽缩放，并在右侧属性面板设置对齐与说明。
+          支持：标题、表格、列表、图片上传/粘贴；在右侧「图片属性」面板可调整宽度、对齐方式与说明。
         </div>
 
         <div class="footer-actions">
@@ -68,9 +108,11 @@
         <el-tabs v-model="rightTab">
           <el-tab-pane label="版本历史" name="versions">
             <el-table :data="versions" height="480">
-              <el-table-column prop="id" label="版本ID" width="90" />
               <el-table-column prop="sourceType" label="来源" width="100" />
               <el-table-column prop="summary" label="摘要" />
+              <el-table-column label="保存时间" width="180">
+                <template #default="scope">{{ formatDateTime(scope.row.createdAt) }}</template>
+              </el-table-column>
               <el-table-column label="操作" width="120">
                 <template #default="scope">
                   <el-button size="small" @click="loadVersion(scope.row)">查看</el-button>
@@ -102,9 +144,7 @@
                 <el-form-item label="宽度">
                   <el-input-number v-model="imageForm.width" :min="80" :max="1200" :step="10" />
                 </el-form-item>
-                <el-form-item label="拖拽">
-                  <el-tag type="info">编辑区内在图片右边缘按住鼠标拖拽即可缩放</el-tag>
-                </el-form-item>
+
                 <el-form-item label="对齐">
                   <el-radio-group v-model="imageForm.align">
                     <el-radio-button label="left">左</el-radio-button>
@@ -118,9 +158,7 @@
                 <el-form-item label="引用">
                   <el-input v-model="imageForm.src" disabled />
                 </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" @click="applyImageProps">应用属性</el-button>
-                </el-form-item>
+                <el-alert title="属性变更会实时应用到编辑区" type="info" :closable="false" />
                 <el-form-item label="导出标记">
                   <el-input :value="imageMarkerPreview" readonly />
                 </el-form-item>
@@ -208,22 +246,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CirclePlus, Delete, Operation } from '@element-plus/icons-vue'
 import { Editor, Toolbar } from '@wangeditor/editor-for-vue'
 import type { IDomEditor, IEditorConfig } from '@wangeditor/editor'
+import { SlateEditor, SlateTransforms, DomEditor } from '@wangeditor/editor'
 import { api } from '@/api'
 
 type ImageMeta = {
   index: number
+  path: number[]
   src: string
   width: number
   align: 'left' | 'center' | 'right'
   caption: string
 }
-
-const AUTO_SAVE_MS = 30000
 
 const route = useRoute()
 const router = useRouter()
@@ -254,16 +293,10 @@ const saving = ref(false)
 const dirty = ref(false)
 const isProgrammaticChange = ref(false)
 const lastSavedContent = ref('')
-const lastAutoSavedAt = ref<number | null>(null)
-let autoSaveTimer: number | null = null
+const lastSavedAt = ref<number | null>(null)
 let imageSyncTimer: number | null = null
-
-const resizeState = reactive({
-  active: false,
-  startX: 0,
-  startWidth: 0,
-  target: null as HTMLImageElement | null
-})
+let applyTimer: number | null = null
+const syncingImageForm = ref(false)
 
 const textLength = computed(() => {
   if (!editorRef.value) return 0
@@ -273,8 +306,8 @@ const selectedImage = computed(() => images.value.find(item => item.index === se
 const autosaveText = computed(() => {
   if (saving.value) return '自动保存中...'
   if (dirty.value) return '有未保存修改'
-  if (lastAutoSavedAt.value) return `已自动保存 ${new Date(lastAutoSavedAt.value).toLocaleTimeString()}`
-  return '内容已保存'
+  if (lastSavedAt.value) return `最近保存：${new Date(lastSavedAt.value).toLocaleTimeString()}`
+  return '尚未保存'
 })
 const imageMarkerPreview = computed(() => {
   if (!selectedImage.value) return ''
@@ -292,7 +325,8 @@ const editorConfig: Partial<IEditorConfig> = {
         const formData = new FormData()
         formData.append('file', file)
         const { data } = await api.uploadEditorImage(formData)
-        insertFn(data.url, data.originalName || file.name, data.url)
+        // 仅插入图片本身，不附带超链接包装，避免后续样式和选中行为异常
+        insertFn(data.url, data.originalName || file.name)
         setTimeout(syncImageList, 80)
       }
     }
@@ -314,6 +348,9 @@ const assetForm = reactive({
 })
 const templateApplyForm = reactive({ templateId: undefined as number | undefined })
 const templateSaveForm = reactive({ name: '', description: '' })
+const centerRenameEditing = ref(false)
+const centerRenameTitle = ref('')
+const centerRenameInputRef = ref()
 
 const normalizeToHtml = (raw: string) => {
   if (!raw) return ''
@@ -322,35 +359,135 @@ const normalizeToHtml = (raw: string) => {
   const escaped = trimmed.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return escaped.split('\n').map(line => `<p>${line || '<br>'}</p>`).join('')
 }
-const parseWidth = (img: HTMLImageElement) => {
-  const fromWidth = Number.parseInt(img.getAttribute('width') || '', 10)
-  if (!Number.isNaN(fromWidth) && fromWidth > 0) return fromWidth
-  const fromStyle = Number.parseInt((img.style.width || '').replace(/px$/, ''), 10)
-  if (!Number.isNaN(fromStyle) && fromStyle > 0) return fromStyle
-  return Math.round(img.getBoundingClientRect().width) || 320
-}
-const parseAlign = (img: HTMLImageElement): 'left' | 'center' | 'right' => {
-  const dataAlign = (img.getAttribute('data-align') || '').toLowerCase()
-  if (dataAlign === 'center' || dataAlign === 'right') return dataAlign
-  const style = (img.getAttribute('style') || '').toLowerCase()
-  if (style.includes('margin-left: auto') && style.includes('margin-right: auto')) return 'center'
-  if (style.includes('margin-left: auto')) return 'right'
-  return 'left'
-}
-const parseImagesFromHtml = (html: string): ImageMeta[] => {
-  const doc = new DOMParser().parseFromString(html || '', 'text/html')
-  return Array.from(doc.querySelectorAll('img')).map((node, idx) => {
-    const img = node as HTMLImageElement
-    const caption = img.getAttribute('data-caption') || img.getAttribute('alt') || ''
-    return {
-      index: idx,
-      src: img.getAttribute('src') || '',
-      width: parseWidth(img),
-      align: parseAlign(img),
-      caption
+// ─── 图片管理：基于 Slate 模型的统一读写，解决 DOM 与数据不同步问题 ───
+
+/** 从 Slate 编辑器模型读取所有 image 节点，构建图片列表（替代旧的 DOMParser 方案） */
+const syncImageList = () => {
+  const editor = editorRef.value
+  if (!editor) {
+    images.value = []
+    selectedImageIndex.value = -1
+    imageForm.src = ''
+    return
+  }
+  try {
+    const entries = Array.from(
+      SlateEditor.nodes(editor as any, {
+        at: [],
+        match: (n: any) => !!(n && n.type === 'image'),
+      })
+    )
+    const result: ImageMeta[] = entries.map(([node, path], idx) => {
+      const n = node as any
+      const widthStr: string = n.style?.width || ''
+      const width = parseInt(widthStr) || 320
+      // 对齐信息从 DOM wrapper 读取（WangEditor 图片 Slate 节点不含 align 属性）
+      let align: 'left' | 'center' | 'right' = 'left'
+      try {
+        const dom = DomEditor.toDOMNode(editor, n) as HTMLElement
+        const wrapper = dom.closest?.('[data-w-e-type="image"]') as HTMLElement | null
+        const da = dom.getAttribute?.('data-align') || wrapper?.getAttribute('data-align') || ''
+        if (da === 'center') align = 'center'
+        else if (da === 'right') align = 'right'
+        else if (wrapper) {
+          const jc = wrapper.style.justifyContent || ''
+          if (jc === 'center') align = 'center'
+          else if (jc.includes('end')) align = 'right'
+        }
+      } catch { /* 节点可能尚未挂载到 DOM */ }
+      return { index: idx, path: [...path], src: n.src || '', width, align, caption: n.alt || '' }
+    })
+    images.value = result
+    if (!result.length) {
+      selectedImageIndex.value = -1
+      imageForm.src = ''
+      return
     }
-  })
+    if (selectedImageIndex.value < 0 || !result.find(i => i.index === selectedImageIndex.value)) {
+      selectedImageIndex.value = result[0].index
+    }
+    fillImageForm(selectedImageIndex.value)
+  } catch {
+    images.value = []
+  }
 }
+
+/** 将选中图片的属性填充到右侧编辑表单 */
+const fillImageForm = (index: number) => {
+  const meta = images.value.find(i => i.index === index)
+  if (!meta) return
+  syncingImageForm.value = true
+  imageForm.src = meta.src
+  imageForm.width = meta.width
+  imageForm.align = meta.align
+  imageForm.caption = meta.caption
+  nextTick(() => { syncingImageForm.value = false })
+}
+
+/** 在右侧面板中选择一张图片 */
+const selectImageByIndex = (index: number) => {
+  selectedImageIndex.value = index
+  fillImageForm(index)
+  rightTab.value = 'image'
+}
+
+/**
+ * 通过 Slate API 修改图片属性（宽度、说明），通过 DOM 设置对齐方式。
+ * 这是唯一的写入入口，保证数据一致性。
+ */
+const applyImageProps = () => {
+  const editor = editorRef.value
+  const meta = selectedImage.value
+  if (!editor || !meta) return
+  const width = Math.max(80, Math.min(1200, Number(imageForm.width) || 320))
+  // 1. 通过 Slate API 修改 width 和 alt —— 自动同步到 HTML 和 DOM
+  try {
+    SlateTransforms.setNodes(
+      editor as any,
+      { style: { width: `${width}px` }, alt: imageForm.caption?.trim() || '' } as any,
+      { at: meta.path }
+    )
+  } catch {
+    // path 可能因内容变动而过期，刷新后重试
+    syncImageList()
+    return
+  }
+  // 2. 对齐方式通过 DOM 操作（WangEditor 图片节点不支持原生 align 属性）
+  try {
+    const entries = Array.from(
+      SlateEditor.nodes(editor as any, { at: [], match: (n: any) => n.type === 'image' })
+    )
+    const entry = entries[meta.index]
+    if (entry) {
+      const dom = DomEditor.toDOMNode(editor, entry[0]) as HTMLElement
+      const wrapper = dom.closest('[data-w-e-type="image"]') as HTMLElement | null
+      dom.setAttribute('data-align', imageForm.align)
+      if (wrapper) {
+        wrapper.setAttribute('data-align', imageForm.align)
+        wrapper.style.display = 'flex'
+        wrapper.style.width = '100%'
+        wrapper.style.justifyContent =
+          imageForm.align === 'center' ? 'center'
+          : imageForm.align === 'right' ? 'flex-end'
+          : 'flex-start'
+      }
+    }
+  } catch { /* 忽略 DOM 操作异常 */ }
+  dirty.value = true
+  nextTick(syncImageList)
+}
+
+/** 防抖应用图片属性变更 */
+const applyImagePropsSilently = (debounceMs = 0) => {
+  if (syncingImageForm.value || selectedImageIndex.value < 0) return
+  if (applyTimer) { window.clearTimeout(applyTimer); applyTimer = null }
+  if (debounceMs > 0) {
+    applyTimer = window.setTimeout(applyImageProps, debounceMs)
+  } else {
+    applyImageProps()
+  }
+}
+
 const setProgrammaticContent = (html: string) => {
   isProgrammaticChange.value = true
   content.value = html
@@ -359,110 +496,30 @@ const setProgrammaticContent = (html: string) => {
   setTimeout(() => {
     isProgrammaticChange.value = false
     syncImageList()
-  }, 0)
+  }, 60)
 }
-const syncImageList = () => {
-  images.value = parseImagesFromHtml(content.value)
-  if (!images.value.length) {
-    selectedImageIndex.value = -1
-    imageForm.src = ''
-    return
-  }
-  if (selectedImageIndex.value < 0 || !images.value.find(item => item.index === selectedImageIndex.value)) {
-    selectedImageIndex.value = images.value[0].index
-  }
-  fillImageForm(selectedImageIndex.value)
-}
-const fillImageForm = (index: number) => {
-  const meta = images.value.find(item => item.index === index)
-  if (!meta) return
-  imageForm.src = meta.src
-  imageForm.width = meta.width
-  imageForm.align = meta.align
-  imageForm.caption = meta.caption
-}
-const selectImageByIndex = (index: number) => {
-  selectedImageIndex.value = index
-  fillImageForm(index)
-  rightTab.value = 'image'
-}
-const applyImageProps = () => {
-  if (selectedImageIndex.value < 0) return
-  const doc = new DOMParser().parseFromString(content.value || '', 'text/html')
-  const list = Array.from(doc.querySelectorAll('img'))
-  const target = list[selectedImageIndex.value] as HTMLImageElement | undefined
-  if (!target) return
-  const width = Math.max(80, Math.min(1200, Number(imageForm.width || 320)))
-  target.setAttribute('width', String(width))
-  target.style.width = `${width}px`
-  target.style.height = 'auto'
-  target.style.display = 'block'
-  target.setAttribute('data-align', imageForm.align)
-  if (imageForm.align === 'center') {
-    target.style.margin = '0 auto'
-  } else if (imageForm.align === 'right') {
-    target.style.marginLeft = 'auto'
-    target.style.marginRight = '0'
-  } else {
-    target.style.marginLeft = '0'
-    target.style.marginRight = 'auto'
-  }
-  if (imageForm.caption?.trim()) {
-    target.setAttribute('data-caption', imageForm.caption.trim())
-    target.setAttribute('alt', imageForm.caption.trim())
-  } else {
-    target.removeAttribute('data-caption')
-  }
-  content.value = doc.body.innerHTML
-  syncImageList()
-  dirty.value = true
-  ElMessage.success('图片属性已应用')
-}
+
 const handleEditorCreated = (editor: IDomEditor) => {
   editorRef.value = editor
+  // 编辑器初始化完成后从 Slate 模型同步图片列表
+  setTimeout(syncImageList, 80)
 }
+
+/** 点击编辑器中的图片时，通过 DomEditor 精确定位 Slate 节点并选中 */
 const handleEditorShellClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement | null
   if (!target || target.tagName.toLowerCase() !== 'img') return
-  const container = editorShellRef.value?.querySelector('.w-e-text-container')
-  if (!container) return
-  const all = Array.from(container.querySelectorAll('img'))
-  const index = all.indexOf(target as HTMLImageElement)
-  if (index >= 0) selectImageByIndex(index)
-}
-const handleEditorShellMouseDown = (event: MouseEvent) => {
-  const target = event.target as HTMLElement | null
-  if (!target || target.tagName.toLowerCase() !== 'img') return
-  const img = target as HTMLImageElement
-  const rect = img.getBoundingClientRect()
-  if (rect.right - event.clientX > 14) return
-  resizeState.active = true
-  resizeState.startX = event.clientX
-  resizeState.startWidth = parseWidth(img)
-  resizeState.target = img
-  img.classList.add('img-resizing')
-  event.preventDefault()
-}
-const onWindowMouseMove = (event: MouseEvent) => {
-  if (!resizeState.active || !resizeState.target) return
-  const next = Math.max(80, Math.min(1200, resizeState.startWidth + (event.clientX - resizeState.startX)))
-  resizeState.target.style.width = `${next}px`
-  resizeState.target.style.height = 'auto'
-  imageForm.width = Math.round(next)
-}
-const onWindowMouseUp = () => {
-  if (!resizeState.active) return
-  resizeState.active = false
-  if (resizeState.target) {
-    resizeState.target.classList.remove('img-resizing')
-  }
-  resizeState.target = null
-  const html = editorRef.value?.getHtml()
-  if (html) {
-    content.value = html
-    dirty.value = true
-    syncImageList()
-  }
+  const editor = editorRef.value
+  if (!editor) return
+  try {
+    const slateNode = DomEditor.toSlateNode(editor, target)
+    if (!slateNode || (slateNode as any).type !== 'image') return
+    const path = DomEditor.findPath(editor, slateNode)
+    const matchIdx = images.value.findIndex(
+      img => img.path.length === path.length && img.path.every((v, i) => v === path[i])
+    )
+    if (matchIdx >= 0) selectImageByIndex(matchIdx)
+  } catch { /* 忽略罕见的 DOM 不一致 */ }
 }
 
 const persistVersion = async (summary: string, showMessage: boolean) => {
@@ -474,9 +531,7 @@ const persistVersion = async (summary: string, showMessage: boolean) => {
     versions.value = [data, ...versions.value.filter(v => v.id !== data.id)]
     lastSavedContent.value = content.value
     dirty.value = false
-    if (summary === '自动保存') {
-      lastAutoSavedAt.value = Date.now()
-    }
+    lastSavedAt.value = Date.now()
     if (showMessage) ElMessage.success('版本已保存')
   } catch (err: any) {
     if (showMessage) {
@@ -486,8 +541,8 @@ const persistVersion = async (summary: string, showMessage: boolean) => {
     saving.value = false
   }
 }
-const autoSave = async () => {
-  await persistVersion('自动保存', false)
+const handleWindowBlur = async () => {
+  await persistVersion('窗口失焦自动保存', false)
 }
 const confirmLeaveIfDirty = async () => {
   if (!dirty.value || saving.value) return true
@@ -520,8 +575,115 @@ const handleSelect = async (node: any) => {
   if (node.currentVersionId) {
     const v = await api.getVersion(node.id, node.currentVersionId)
     setProgrammaticContent(normalizeToHtml(v.data.content || ''))
+    if (v.data.createdAt) {
+      lastSavedAt.value = new Date(v.data.createdAt).getTime()
+    }
   } else {
     setProgrammaticContent('')
+    lastSavedAt.value = null
+  }
+}
+const findNodeAndSiblings = (nodeId: number, nodes: any[] = sectionTree.value, parent: any = null): { node: any; siblings: any[]; parent: any | null } | null => {
+  for (const item of nodes) {
+    if (item.id === nodeId) {
+      return { node: item, siblings: nodes, parent }
+    }
+    if (item.children?.length) {
+      const found = findNodeAndSiblings(nodeId, item.children, item)
+      if (found) return found
+    }
+  }
+  return null
+}
+const startCenterRename = async () => {
+  if (!currentSection.value) return
+  centerRenameEditing.value = true
+  centerRenameTitle.value = currentSection.value.title || ''
+  await nextTick()
+  centerRenameInputRef.value?.focus?.()
+}
+const cancelCenterRename = () => {
+  centerRenameEditing.value = false
+  centerRenameTitle.value = ''
+}
+const commitCenterRename = async () => {
+  if (!centerRenameEditing.value || !currentSection.value) return
+  const title = centerRenameTitle.value.trim()
+  centerRenameEditing.value = false
+  if (!title || title === currentSection.value.title) return
+  try {
+    await api.updateSection(currentSection.value.id, { title })
+    const found = findNodeAndSiblings(currentSection.value.id)
+    if (found) {
+      found.node.title = title
+    }
+    currentSection.value.title = title
+    ElMessage.success('章节名称已修改')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message || '修改失败')
+  }
+}
+const createSectionAt = async (anchor: any, mode: 'child' | 'sibling') => {
+  const result: any = await ElMessageBox.prompt('请输入章节名称', mode === 'child' ? '新增子章节' : '新增同级章节', {
+    inputValue: mode === 'child' ? `${anchor.title}-子章节` : `${anchor.title}-同级`,
+    confirmButtonText: '创建',
+    cancelButtonText: '取消'
+  }).catch(() => null)
+  if (!result?.value?.trim()) return
+  const name = result.value.trim()
+  const found = findNodeAndSiblings(anchor.id)
+  if (!found) return
+  const targetSiblings = mode === 'child' ? (found.node.children || []) : found.siblings
+  const maxSort = targetSiblings.reduce((m: number, n: any) => Math.max(m, Number(n.sortIndex || 0)), 0)
+  const payload = {
+    title: name,
+    parentId: mode === 'child' ? anchor.id : (anchor.parentId || null),
+    level: mode === 'child' ? Number(anchor.level || 1) + 1 : Number(anchor.level || 1),
+    sortIndex: maxSort + 1
+  }
+  try {
+    const { data } = await api.createSection(Number(route.params.id), payload)
+    ElMessage.success('章节创建成功')
+    await load()
+    const created = findNodeAndSiblings(data.id)
+    if (created) {
+      await handleSelect(created.node)
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message || '创建失败')
+  }
+}
+const createChildSection = async (node: any) => {
+  if (!(await confirmLeaveIfDirty())) return
+  await createSectionAt(node, 'child')
+}
+const createSiblingSection = async (node: any) => {
+  if (!(await confirmLeaveIfDirty())) return
+  await createSectionAt(node, 'sibling')
+}
+const deleteSectionNode = async (node: any) => {
+  const currentId = currentSection.value?.id
+  if (currentId === node.id && !(await confirmLeaveIfDirty())) return
+  try {
+    await ElMessageBox.confirm(`确认删除章节「${node.title}」吗？`, '删除确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+    await api.deleteSection(node.id)
+    if (currentSection.value?.id === node.id) {
+      currentSection.value = null
+      content.value = ''
+      versions.value = []
+      dirty.value = false
+      lastSavedContent.value = ''
+    }
+    ElMessage.success('章节已删除')
+    await load()
+  } catch (err: any) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.response?.data?.message || '删除失败')
+    }
   }
 }
 const createSection = async () => {
@@ -552,6 +714,9 @@ const loadVersion = async (row: any) => {
   if (!(await confirmLeaveIfDirty())) return
   const res = await api.getVersion(currentSection.value.id, row.id)
   setProgrammaticContent(normalizeToHtml(res.data.content || ''))
+  if (res.data.createdAt) {
+    lastSavedAt.value = new Date(res.data.createdAt).getTime()
+  }
 }
 const openAssetDialog = () => {
   if (!currentSection.value) return
@@ -630,6 +795,12 @@ const onBeforeUnload = (event: BeforeUnloadEvent) => {
   event.preventDefault()
   event.returnValue = ''
 }
+const formatDateTime = (value: string) => {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleString()
+}
 
 watch(content, () => {
   if (isProgrammaticChange.value) return
@@ -639,6 +810,15 @@ watch(content, () => {
   }
   imageSyncTimer = window.setTimeout(syncImageList, 220)
 })
+watch(() => imageForm.align, () => {
+  applyImagePropsSilently(0)
+})
+watch(() => imageForm.width, () => {
+  applyImagePropsSilently(120)
+})
+watch(() => imageForm.caption, () => {
+  applyImagePropsSilently(200)
+})
 
 onBeforeRouteLeave(async (_to, _from, next) => {
   if (await confirmLeaveIfDirty()) next()
@@ -647,18 +827,15 @@ onBeforeRouteLeave(async (_to, _from, next) => {
 
 onMounted(async () => {
   await load()
-  autoSaveTimer = window.setInterval(autoSave, AUTO_SAVE_MS)
   window.addEventListener('beforeunload', onBeforeUnload)
-  window.addEventListener('mousemove', onWindowMouseMove)
-  window.addEventListener('mouseup', onWindowMouseUp)
+  window.addEventListener('blur', handleWindowBlur)
 })
 
 onBeforeUnmount(() => {
-  if (autoSaveTimer) window.clearInterval(autoSaveTimer)
   if (imageSyncTimer) window.clearTimeout(imageSyncTimer)
+  if (applyTimer) window.clearTimeout(applyTimer)
   window.removeEventListener('beforeunload', onBeforeUnload)
-  window.removeEventListener('mousemove', onWindowMouseMove)
-  window.removeEventListener('mouseup', onWindowMouseUp)
+  window.removeEventListener('blur', handleWindowBlur)
   editorRef.value?.destroy()
 })
 </script>
@@ -673,6 +850,13 @@ onBeforeUnmount(() => {
   grid-template-columns: 300px minmax(0, 1.25fr) minmax(320px, 0.85fr);
   gap: 16px;
   margin-top: 16px;
+}
+
+.editor :deep(.card) {
+  border: 1px solid #dfe6f1;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
 .tree-header,
@@ -690,6 +874,49 @@ onBeforeUnmount(() => {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  row-gap: 8px;
+}
+
+.tree-node-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tree-node-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-node-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+
+:deep(.el-tree-node__content:hover .tree-node-actions) {
+  opacity: 1;
+}
+
+.center-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.center-title {
+  cursor: pointer;
+}
+
+.center-title-input {
+  width: 320px;
 }
 
 .tree,
@@ -711,9 +938,10 @@ onBeforeUnmount(() => {
 
 .editor-shell {
   border: 1px solid #dce4ef;
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
   background: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .editor-toolbar {
@@ -724,6 +952,28 @@ onBeforeUnmount(() => {
   min-height: 520px;
   max-height: 560px;
   overflow-y: auto;
+  background: #f1f4f8;
+}
+
+/* A4 编辑纸张：210mm * 297mm，按 96dpi 约 794px * 1123px */
+.editor-main :deep(.w-e-text-container) {
+  background: transparent;
+}
+
+.editor-main :deep(.w-e-text-container [data-slate-editor]) {
+  width: 794px;
+  min-height: 1123px;
+  margin: 18px auto;
+  padding: 64px 72px;
+  background: #fff;
+  border: 1px solid #d9e1ec;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  box-sizing: border-box;
+  line-height: 1.6;
+}
+
+.editor-main :deep(.w-e-text-container p) {
+  margin: 0 0 10px;
 }
 
 .editor-hint {
@@ -751,7 +1001,7 @@ onBeforeUnmount(() => {
   max-height: 170px;
   overflow: auto;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -824,11 +1074,20 @@ onBeforeUnmount(() => {
 
 .status {
   font-size: 12px;
-  opacity: 0.78;
+  color: #60708a;
 }
 
 :deep(.el-tree) {
   overflow: auto;
+}
+
+:deep(.el-tree-node__content) {
+  border-radius: 8px;
+  margin: 2px 0;
+}
+
+:deep(.el-tree-node.is-current > .el-tree-node__content) {
+  background: #e8f0fe;
 }
 
 :deep(.el-table) {
@@ -839,14 +1098,30 @@ onBeforeUnmount(() => {
   max-width: 100%;
   border-radius: 4px;
   outline: 1px solid transparent;
+  display: block;
+  cursor: pointer;
+}
+
+:deep(.w-e-text-container [data-w-e-type="image"]) {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  line-height: 0;
+  padding: 0;
+  margin: 8px 0;
+  box-sizing: border-box;
+}
+
+:deep(.w-e-text-container [data-w-e-type="image"][data-align="center"]) {
+  justify-content: center;
+}
+
+:deep(.w-e-text-container [data-w-e-type="image"][data-align="right"]) {
+  justify-content: flex-end;
 }
 
 :deep(.w-e-text-container img:hover) {
-  outline: 1px dashed #a7b6cc;
-}
-
-:deep(.w-e-text-container img.img-resizing) {
-  outline: 2px solid #1a73e8;
+  outline: 2px dashed #a7b6cc;
 }
 
 @media (max-width: 1380px) {
@@ -857,6 +1132,14 @@ onBeforeUnmount(() => {
   .tree,
   .versions {
     max-height: none;
+  }
+}
+
+@media (max-width: 980px) {
+  .editor-main :deep(.w-e-text-container [data-slate-editor]) {
+    width: calc(100% - 20px);
+    min-height: 900px;
+    padding: 28px 20px;
   }
 }
 </style>

@@ -1,0 +1,21 @@
+# ─── 后端 (Maven / Java) ───
+backend/target/
+
+# ─── 前端 (Node / Vite) ───
+frontend/dist/
+frontend/node_modules/
+
+# ─── IDE ───
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# ─── 系统文件 ───
+.DS_Store
+Thumbs.db
+
+# ─── 日志 ───
+*.log

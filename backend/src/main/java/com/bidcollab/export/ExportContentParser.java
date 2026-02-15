@@ -84,22 +84,20 @@ public final class ExportContentParser {
     while (matcher.find()) {
       String tag = matcher.group(0);
       String src = matcher.group(1);
-      String width = attrValue(tag, "width");
-      String alt = attrValue(tag, "alt");
+      String width = firstNonBlank(
+          attrValue(tag, "data-width"),
+          attrValue(tag, "width"),
+          extractWidthFromStyle(attrValue(tag, "style")));
+      String alt = firstNonBlank(attrValue(tag, "data-caption"), attrValue(tag, "alt"));
       String style = attrValue(tag, "style");
-      String align = "left";
-      if (style != null && style.toLowerCase().contains("margin: 0 auto")) {
-        align = "center";
-      }
+      String align = normalizeAlign(firstNonBlank(attrValue(tag, "data-align"), extractAlignFromStyle(style)));
       StringBuilder marker = new StringBuilder("\n[img");
       if (width != null && !width.isBlank()) {
         marker.append(" width=").append(width.replaceAll("[^0-9]", ""));
       }
-      if (align != null) {
-        marker.append(" align=").append(align);
-      }
+      marker.append(" align=").append(align);
       if (alt != null && !alt.isBlank()) {
-        marker.append(" alt=\"").append(alt.replace("\"", "'")).append("\"");
+        marker.append(" caption=\"").append(alt.replace("\"", "'")).append("\"");
       }
       marker.append("]").append(src).append("\n");
       matcher.appendReplacement(sb, Matcher.quoteReplacement(marker.toString()));
@@ -109,9 +107,43 @@ public final class ExportContentParser {
   }
 
   private static String attrValue(String tag, String key) {
-    Pattern p = Pattern.compile("(?i)\\b" + key + "=[\"']([^\"']+)[\"']");
+    Pattern p = Pattern.compile("(?i)\\b" + Pattern.quote(key) + "=[\"']([^\"']+)[\"']");
     Matcher m = p.matcher(tag);
     return m.find() ? m.group(1) : null;
+  }
+
+  private static String extractWidthFromStyle(String style) {
+    if (style == null || style.isBlank()) {
+      return null;
+    }
+    Matcher m = Pattern.compile("(?i)\\bwidth\\s*:\\s*(\\d+)\\s*px").matcher(style);
+    return m.find() ? m.group(1) : null;
+  }
+
+  private static String extractAlignFromStyle(String style) {
+    if (style == null || style.isBlank()) {
+      return null;
+    }
+    String low = style.toLowerCase();
+    if (low.contains("margin-left: auto") && low.contains("margin-right: auto")) {
+      return "center";
+    }
+    if (low.contains("margin-left: auto")) {
+      return "right";
+    }
+    return "left";
+  }
+
+  private static String firstNonBlank(String... values) {
+    if (values == null) {
+      return null;
+    }
+    for (String value : values) {
+      if (value != null && !value.isBlank()) {
+        return value.trim();
+      }
+    }
+    return null;
   }
 
   private static Map<String, String> parseAttrs(String attrText) {
