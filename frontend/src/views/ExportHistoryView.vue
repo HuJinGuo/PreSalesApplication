@@ -15,10 +15,11 @@
         <el-table-column prop="id" label="ID" width="80" />
         <el-table-column prop="format" label="格式" width="100" />
         <el-table-column prop="status" label="状态" width="120" />
+        <el-table-column prop="errorMessage" label="失败原因" min-width="220" />
         <el-table-column prop="filePath" label="路径" />
         <el-table-column label="操作" width="120">
           <template #default="scope">
-            <el-button size="small" @click="download(scope.row)">下载</el-button>
+            <el-button size="small" :disabled="scope.row.status !== 'SUCCESS'" @click="download(scope.row)">下载</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -44,8 +45,12 @@ const load = async () => {
 
 const exportDoc = async () => {
   const docId = Number(route.params.docId)
-  await api.exportDocument(docId, { format: format.value })
-  ElMessage.success('导出任务已创建')
+  const { data } = await api.exportDocument(docId, { format: format.value })
+  if (data?.status === 'FAILED') {
+    ElMessage.error(`导出失败：${data?.errorMessage || '未知错误'}`)
+  } else {
+    ElMessage.success('导出任务已创建')
+  }
   await load()
 }
 

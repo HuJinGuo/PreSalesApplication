@@ -21,7 +21,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -155,27 +154,43 @@ public class SectionService {
     if (section.getLockedBy() != null && !section.getLockedBy().equals(userId)) {
       throw new IllegalStateException("Section is locked by another user");
     }
-    SectionVersion version = SectionVersion.builder()
-        .section(section)
-        .content(request.getContent())
-        .summary(request.getSummary())
-        .sourceType(sourceType)
-        .sourceRef(sourceRef)
-        .createdBy(userId)
-        .build();
+    SectionVersion version = section.getCurrentVersion();
+    if (version == null) {
+      version = SectionVersion.builder()
+          .section(section)
+          .content(request.getContent())
+          .summary(request.getSummary())
+          .sourceType(sourceType)
+          .sourceRef(sourceRef)
+          .createdBy(userId)
+          .build();
+    } else {
+      // 章节层只维护当前版本内容，不再持续新增历史记录
+      version.setContent(request.getContent());
+      version.setSummary(request.getSummary());
+      version.setSourceType(sourceType);
+      version.setSourceRef(sourceRef);
+      version.setCreatedBy(userId);
+    }
     sectionVersionRepository.save(version);
     section.setCurrentVersion(version);
     return toVersionResponse(version);
   }
 
   public List<SectionVersionResponse> listVersions(Long sectionId) {
-    return sectionVersionRepository.findBySectionIdOrderByCreatedAtDesc(sectionId).stream()
-        .map(this::toVersionResponse)
-        .collect(Collectors.toList());
+    Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
+    if (section.getCurrentVersion() == null) {
+      return List.of();
+    }
+    return List.of(toVersionResponse(section.getCurrentVersion()));
   }
 
   public SectionVersionResponse getVersion(Long sectionId, Long versionId) {
-    SectionVersion version = sectionVersionRepository.findById(versionId).orElseThrow(EntityNotFoundException::new);
+    Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
+    SectionVersion version = section.getCurrentVersion();
+    if (version == null) {
+      throw new EntityNotFoundException();
+    }
     if (!version.getSection().getId().equals(sectionId)) {
       throw new IllegalArgumentException("Version does not belong to section");
     }

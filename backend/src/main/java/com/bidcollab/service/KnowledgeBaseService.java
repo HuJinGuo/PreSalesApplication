@@ -43,6 +43,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -51,6 +53,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.regex.Pattern;
@@ -97,6 +100,7 @@ public class KnowledgeBaseService {
   private final TextChunker textChunker;
   private final AiClient aiClient;
   private final String knowledgeStorageDir;
+  private final String uploadStorageDir;
   /** Embedding 并行线程池，控制并发数避免压垮 AI API */
   private final ExecutorService embeddingExecutor;
 
@@ -114,6 +118,7 @@ public class KnowledgeBaseService {
       TextChunker textChunker,
       AiClient aiClient,
       @Value("${app.knowledge.storage-dir:/tmp/bid-knowledge-files}") String knowledgeStorageDir,
+      @Value("${app.upload.storage-dir:/tmp/bid-doc-uploads}") String uploadStorageDir,
       @Qualifier("embeddingExecutor") ExecutorService embeddingExecutor) {
     this.baseRepository = baseRepository;
     this.lexiconRepository = lexiconRepository;
@@ -129,6 +134,7 @@ public class KnowledgeBaseService {
     this.textChunker = textChunker;
     this.aiClient = aiClient;
     this.knowledgeStorageDir = knowledgeStorageDir;
+    this.uploadStorageDir = uploadStorageDir;
     this.embeddingExecutor = embeddingExecutor;
   }
 
@@ -167,7 +173,7 @@ public class KnowledgeBaseService {
       if ("UPLOAD".equalsIgnoreCase(doc.getSourceType())
           && doc.getStoragePath() != null
           && !doc.getStoragePath().isBlank()) {
-        doc.setContent(extractTextFromStoredFile(doc.getStoragePath(), doc.getFileName()));
+        doc.setContent(extractTextFromStoredFile(doc));
       }
       reindexDocument(doc);
     }
@@ -246,8 +252,6 @@ public class KnowledgeBaseService {
   @Transactional
   public KnowledgeDocumentResponse upload(Long kbId, MultipartFile file) {
     KnowledgeBase kb = baseRepository.findById(kbId).orElseThrow(EntityNotFoundException::new);
-    // [AI-READ] 统一抽取为纯文本，屏蔽不同文件格式差异，便于后续统一处理。
-    String content = textExtractor.extract(file);
     String fileName = file.getOriginalFilename() == null ? "unknown" : file.getOriginalFilename();
     String fileType = fileName.contains(".") ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase() : "bin";
     String storagePath = storeUploadedFile(kbId, file);
@@ -259,11 +263,12 @@ public class KnowledgeBaseService {
         .fileName(fileName)
         .fileType(fileType)
         .storagePath(storagePath)
-        .content(content)
+        .content("")
         .visibility(KnowledgeVisibility.PRIVATE)
         .createdBy(currentUserService.getCurrentUserId())
         .build();
     documentRepository.save(doc);
+    doc.setContent(extractTextFromStoredFile(doc));
     // [AI-READ] 上传完成后立即重建向量索引，保证“上传即检索可用”。
     reindexDocument(doc);
     return toDocumentResponse(doc);
@@ -366,19 +371,29 @@ public class KnowledgeBaseService {
       return List.of();
     }
 
-    List<Double> queryVector = aiClient.embedding(request.getQuery());
+    String query = request.getQuery() == null ? "" : request.getQuery().trim();
+    List<String> queryTerms = tokenizeQuery(query);
+    List<Double> queryVector = aiClient.embedding(query);
     int topK = request.getTopK() == null || request.getTopK() < 1 ? 5 : request.getTopK();
     int candidateTopK = request.getCandidateTopK() == null || request.getCandidateTopK() < topK
         ? Math.max(topK * 4, topK)
         : request.getCandidateTopK();
     double minScore = request.getMinScore() == null ? 0.0 : request.getMinScore();
 
-    List<KnowledgeSearchResult> candidates = chunkRepository.findByKnowledgeBaseId(kbId).stream()
+    List<KnowledgeChunk> allChunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
         .filter(chunk -> chunk.getKnowledgeDocument() != null
             && allowedDocIds.contains(chunk.getKnowledgeDocument().getId()))
+        .collect(Collectors.toList());
+    List<KnowledgeChunk> sourceChunks = applyRetryPrefilterIfNeeded(
+        allChunks, query, queryTerms, minScore, Boolean.TRUE.equals(request.getRerank()));
+
+    List<KnowledgeSearchResult> candidates = sourceChunks.stream()
         .map(chunk -> {
           List<Double> vec = VectorUtil.fromJson(chunk.getEmbeddingJson());
-          double score = VectorUtil.cosine(queryVector, vec);
+          double vectorScore = VectorUtil.cosine(queryVector, vec);
+          double lexicalScore = lexicalScore(query, queryTerms, chunk.getContent());
+          // 混合打分：向量召回 + 关键词匹配，降低因 embedding 异常导致的漏召回
+          double score = (vectorScore * 0.8) + (lexicalScore * 0.2);
           return KnowledgeSearchResult.builder()
               .chunkId(chunk.getId())
               .documentId(chunk.getKnowledgeDocument().getId())
@@ -396,7 +411,86 @@ public class KnowledgeBaseService {
       candidates = rerankByAi(request.getQuery(), candidates);
     }
 
-    return candidates.stream().limit(topK).collect(Collectors.toList());
+    List<KnowledgeSearchResult> finalResult = candidates.stream().limit(topK).collect(Collectors.toList());
+    if (!finalResult.isEmpty()) {
+      return finalResult;
+    }
+
+    // 兜底：纯关键词召回（不使用 minScore），避免“知识库明明有内容却返回空”
+    return sourceChunks.stream()
+        .filter(chunk -> chunk.getKnowledgeDocument() != null
+            && allowedDocIds.contains(chunk.getKnowledgeDocument().getId()))
+        .map(chunk -> KnowledgeSearchResult.builder()
+            .chunkId(chunk.getId())
+            .documentId(chunk.getKnowledgeDocument().getId())
+            .content(chunk.getContent())
+            .score(lexicalScore(query, queryTerms, chunk.getContent()))
+            .build())
+        .filter(r -> r.getScore() > 0)
+        .sorted(Comparator.comparingDouble(KnowledgeSearchResult::getScore).reversed())
+        .limit(topK)
+        .collect(Collectors.toList());
+  }
+
+  /**
+   * 仅在“降阈值重试”场景做关键词预筛，避免二次检索再做一次全量向量计算。
+   */
+  private List<KnowledgeChunk> applyRetryPrefilterIfNeeded(List<KnowledgeChunk> chunks, String query,
+      List<String> queryTerms, double minScore, boolean rerank) {
+    if (chunks.isEmpty()) {
+      return chunks;
+    }
+    // 只在低阈值 + 关闭重排（即兜底重试）时启用预筛
+    if (minScore > 0.0001 || rerank) {
+      return chunks;
+    }
+    String q = query == null ? "" : query.toLowerCase();
+    List<KnowledgeChunk> filtered = chunks.stream()
+        .filter(chunk -> {
+          String c = chunk.getContent() == null ? "" : chunk.getContent().toLowerCase();
+          if (!q.isBlank() && c.contains(q)) {
+            return true;
+          }
+          for (String term : queryTerms) {
+            if (c.contains(term)) {
+              return true;
+            }
+          }
+          return false;
+        })
+        .limit(600) // 控制重试阶段计算规模
+        .collect(Collectors.toList());
+    return filtered.isEmpty() ? chunks : filtered;
+  }
+
+  private List<String> tokenizeQuery(String query) {
+    if (query == null || query.isBlank()) {
+      return List.of();
+    }
+    return TOKEN_SPLIT.splitAsStream(query.toLowerCase())
+        .map(String::trim)
+        .filter(s -> !s.isBlank())
+        .filter(s -> s.length() >= 2)
+        .distinct()
+        .limit(24)
+        .collect(Collectors.toList());
+  }
+
+  private double lexicalScore(String query, List<String> queryTerms, String content) {
+    if (content == null || content.isBlank()) {
+      return 0D;
+    }
+    String low = content.toLowerCase();
+    double score = 0D;
+    if (query != null && !query.isBlank() && low.contains(query.toLowerCase())) {
+      score += 1.0;
+    }
+    for (String term : queryTerms) {
+      if (low.contains(term)) {
+        score += 0.25;
+      }
+    }
+    return Math.min(score, 2.5D);
   }
 
   /**
@@ -821,6 +915,8 @@ public class KnowledgeBaseService {
     List<String> rawChunks = textChunker.splitBySections(doc.getContent(), 900, 140);
     // 去重/去噪，控制 chunk 数量，避免大文档压垮 embedding 过程。
     List<String> chunks = compactChunks(rawChunks);
+    // [AI-READ] 表格双轨：正文分块之外，额外生成结构化表格 JSON 分块，便于精确检索。
+    chunks.addAll(extractTableJsonChunks(doc.getContent()));
 
     // 并行调用 embedding API：各 chunk 之间互相独立，线程池控制并发数。
     @SuppressWarnings("unchecked")
@@ -845,6 +941,108 @@ public class KnowledgeBaseService {
           .build();
       chunkRepository.save(chunk);
     }
+  }
+
+  // [AI-READ] 从纯文本中识别“|”分隔的表格并转为 JSON 分块，保留结构化信息。
+  private List<String> extractTableJsonChunks(String content) {
+    if (content == null || content.isBlank()) {
+      return List.of();
+    }
+    String[] lines = content.split("\\R");
+    List<String> result = new ArrayList<>();
+    List<String> currentTableLines = new ArrayList<>();
+
+    for (String line : lines) {
+      String normalized = line == null ? "" : line.trim();
+      if (isTableLikeLine(normalized)) {
+        currentTableLines.add(normalized);
+        continue;
+      }
+      flushTableLines(currentTableLines, result);
+    }
+    flushTableLines(currentTableLines, result);
+    return result;
+  }
+
+  private void flushTableLines(List<String> tableLines, List<String> result) {
+    if (tableLines.isEmpty()) {
+      return;
+    }
+    String chunk = buildTableJsonChunk(tableLines);
+    if (chunk != null && !chunk.isBlank()) {
+      result.add(chunk);
+    }
+    tableLines.clear();
+  }
+
+  private boolean isTableLikeLine(String line) {
+    if (line == null || line.isBlank()) {
+      return false;
+    }
+    // 至少包含两个“|”才认为是候选表格行，避免把普通句子误判。
+    return line.chars().filter(ch -> ch == '|').count() >= 2;
+  }
+
+  private String buildTableJsonChunk(List<String> tableLines) {
+    List<String[]> rows = new ArrayList<>();
+    for (String line : tableLines) {
+      String[] cols = splitTableLine(line);
+      if (cols.length < 2) {
+        continue;
+      }
+      rows.add(cols);
+    }
+    if (rows.size() < 2) {
+      return null;
+    }
+
+    String[] header = rows.get(0);
+    List<Map<String, String>> items = new ArrayList<>();
+    for (int i = 1; i < rows.size(); i++) {
+      String[] row = rows.get(i);
+      Map<String, String> obj = new LinkedHashMap<>();
+      for (int c = 0; c < header.length; c++) {
+        String key = sanitizeCell(header[c], "col" + (c + 1));
+        String value = c < row.length ? sanitizeCell(row[c], "") : "";
+        obj.put(key, value);
+      }
+      items.add(obj);
+    }
+    if (items.isEmpty()) {
+      return null;
+    }
+
+    Map<String, Object> tableObj = new LinkedHashMap<>();
+    tableObj.put("type", "table");
+    tableObj.put("columns", header);
+    tableObj.put("rows", items);
+    String json;
+    try {
+      json = MAPPER.writeValueAsString(tableObj);
+    } catch (Exception ex) {
+      return null;
+    }
+
+    // 兼顾向量召回：前缀简短自然语言摘要 + JSON 正文。
+    return "【结构化表格】列: " + String.join("、", header) + "\n[TABLE_JSON]\n" + json;
+  }
+
+  private String[] splitTableLine(String line) {
+    String trimmed = line.trim();
+    if (trimmed.startsWith("|")) {
+      trimmed = trimmed.substring(1);
+    }
+    if (trimmed.endsWith("|")) {
+      trimmed = trimmed.substring(0, trimmed.length() - 1);
+    }
+    return java.util.Arrays.stream(trimmed.split("\\|"))
+        .map(cell -> sanitizeCell(cell, ""))
+        .toArray(String[]::new);
+  }
+
+  private String sanitizeCell(String cell, String fallback) {
+    String normalized = cell == null ? "" : cell.replace('\u00A0', ' ').trim();
+    return normalized.isBlank() ? fallback : normalized;
   }
 
   /**
@@ -1259,13 +1457,53 @@ public class KnowledgeBaseService {
     }
   }
 
-  private String extractTextFromStoredFile(String storagePath, String originalName) {
+  private String extractTextFromStoredFile(KnowledgeDocument doc) {
     try {
-      byte[] bytes = Files.readAllBytes(Path.of(storagePath));
-      return textExtractor.extract(bytes, originalName);
+      byte[] bytes = Files.readAllBytes(Path.of(doc.getStoragePath()));
+      String fileName = doc.getFileName() == null ? "" : doc.getFileName().toLowerCase();
+      if (fileName.endsWith(".docx")) {
+        return extractDocxWithStoredImageMarkers(doc, bytes);
+      }
+      return textExtractor.extract(bytes, doc.getFileName());
     } catch (IOException ex) {
-      throw new IllegalStateException("Failed to re-read stored file: " + storagePath, ex);
+      throw new IllegalStateException("Failed to re-read stored file: " + doc.getStoragePath(), ex);
     }
+  }
+
+  private String extractDocxWithStoredImageMarkers(KnowledgeDocument doc, byte[] bytes) {
+    DocumentTextExtractor.DocxExtractionResult result = textExtractor.extractDocxWithImageMarkers(bytes);
+    String content = result.getTextWithMarkers();
+    for (DocumentTextExtractor.ExtractedImage image : result.getImages()) {
+      String imageUrl = storeKnowledgeImage(doc, image);
+      String caption = sanitizeCaption(image.getFileName());
+      String marker = "[img caption=\"" + caption + "\"]" + imageUrl;
+      content = content.replace(image.getMarker(), marker);
+    }
+    return content;
+  }
+
+  private String storeKnowledgeImage(KnowledgeDocument doc, DocumentTextExtractor.ExtractedImage image) {
+    String ext = image.getExtension() == null || image.getExtension().isBlank() ? "png" : image.getExtension().toLowerCase();
+    LocalDate now = LocalDate.now();
+    String dateDir = now.format(DateTimeFormatter.BASIC_ISO_DATE);
+    String filename = "kb" + doc.getKnowledgeBase().getId() + "_doc" + doc.getId() + "_img"
+        + image.getIndex() + "_" + UUID.randomUUID().toString().replace("-", "") + "." + ext;
+    Path dir = Path.of(uploadStorageDir, "knowledge-images", dateDir);
+    Path target = dir.resolve(filename);
+    try {
+      Files.createDirectories(dir);
+      Files.write(target, image.getData());
+      return "/files/knowledge-images/" + dateDir + "/" + filename;
+    } catch (IOException ex) {
+      throw new IllegalStateException("Failed to store extracted image for knowledge doc: " + doc.getId(), ex);
+    }
+  }
+
+  private String sanitizeCaption(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return "图片";
+    }
+    return raw.replace("\"", "'").replaceAll("\\s+", " ").trim();
   }
 
   /** 将知识库实体转换为响应 DTO。 */
@@ -1301,6 +1539,7 @@ public class KnowledgeBaseService {
         .knowledgeDocumentId(chunk.getKnowledgeDocument() == null ? null : chunk.getKnowledgeDocument().getId())
         .chunkIndex(chunk.getChunkIndex())
         .content(chunk.getContent())
+        .embeddingDim(chunk.getEmbeddingDim())
         .build();
   }
 }

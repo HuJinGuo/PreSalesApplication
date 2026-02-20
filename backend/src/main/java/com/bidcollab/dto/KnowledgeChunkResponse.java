@@ -11,4 +11,5 @@ public class KnowledgeChunkResponse {
   private Long knowledgeDocumentId;
   private Integer chunkIndex;
   private String content;
+  private Integer embeddingDim;
 }

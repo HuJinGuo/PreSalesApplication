@@ -19,12 +19,14 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ExportService {
+  private static final Logger log = LoggerFactory.getLogger(ExportService.class);
   private final DocumentRepository documentRepository;
   private final SectionRepository sectionRepository;
   private final DocumentExportRepository exportRepository;
@@ -33,11 +35,11 @@ public class ExportService {
   private final String uploadDir;
 
   public ExportService(DocumentRepository documentRepository,
-                       SectionRepository sectionRepository,
-                       DocumentExportRepository exportRepository,
-                       CurrentUserService currentUserService,
-                       @Value("${app.export.base-dir}") String baseDir,
-                       @Value("${app.upload.storage-dir:/tmp/bid-doc-uploads}") String uploadDir) {
+      SectionRepository sectionRepository,
+      DocumentExportRepository exportRepository,
+      CurrentUserService currentUserService,
+      @Value("${app.export.base-dir}") String baseDir,
+      @Value("${app.upload.storage-dir:/tmp/bid-doc-uploads}") String uploadDir) {
     this.documentRepository = documentRepository;
     this.sectionRepository = sectionRepository;
     this.exportRepository = exportRepository;
@@ -46,9 +48,15 @@ public class ExportService {
     this.uploadDir = uploadDir;
   }
 
-  @Transactional
+  /**
+   * 导出文档为指定格式（docx / pdf）。
+   * 注意：不使用方法级 @Transactional，避免导出异常触发事务回滚导致 errorMessage 丢失。
+   * 创建记录和更新状态均使用 saveAndFlush 立即持久化。
+   */
   public ExportResponse export(Long documentId, String format) {
     Document document = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
+
+    // 先创建导出记录并立即持久化，确保数据库中有 RUNNING 状态的记录
     DocumentExport export = DocumentExport.builder()
         .documentId(documentId)
         .format(format)
@@ -56,10 +64,10 @@ public class ExportService {
         .startedAt(Instant.now())
         .createdBy(currentUserService.getCurrentUserId())
         .build();
-    exportRepository.save(export);
+    exportRepository.saveAndFlush(export);
 
     try {
-      List<Section> sections = sectionRepository.findByDocumentIdOrderBySortIndexAsc(documentId);
+      List<Section> sections = sectionRepository.findForExportByDocumentId(documentId);
       List<FlattenedSection> flattened = flatten(sections);
       String fileName = "document-" + documentId + "-" + export.getId() + "." + format;
       Path outputPath = Path.of(baseDir, fileName);
@@ -75,10 +83,14 @@ public class ExportService {
       export.setFilePath(outputPath.toString());
       export.setFinishedAt(Instant.now());
     } catch (Exception ex) {
+      log.error("Export failed, documentId={}, exportId={}, format={}", documentId, export.getId(), format, ex);
       export.setStatus(ExportStatus.FAILED);
-      export.setErrorMessage(ex.getMessage());
+      export.setErrorMessage(resolveErrorMessage(ex));
       export.setFinishedAt(Instant.now());
     }
+
+    // 无论成功/失败，都立即持久化最终状态
+    exportRepository.saveAndFlush(export);
     return toResponse(export);
   }
 
@@ -109,13 +121,14 @@ public class ExportService {
   }
 
   private void traverse(Section section, Map<Long, List<Section>> childrenMap, List<FlattenedSection> result,
-                        int[] counters, int level) {
+      int[] counters, int level) {
     counters[level - 1]++;
-    for (int i = level; i < counters.length; i++) counters[i] = 0;
+    for (int i = level; i < counters.length; i++)
+      counters[i] = 0;
     String number = buildNumber(counters, level);
     String content = section.getCurrentVersion() == null ? "" : section.getCurrentVersion().getContent();
     result.add(new FlattenedSection(number, section.getTitle(), content, level));
-    List<Section> children = childrenMap.getOrDefault(section.getId(), List.of());
+    List<Section> children = new ArrayList<>(childrenMap.getOrDefault(section.getId(), List.of()));
     children.sort((a, b) -> a.getSortIndex().compareTo(b.getSortIndex()));
     for (Section child : children) {
       traverse(child, childrenMap, result, counters, level + 1);
@@ -125,7 +138,8 @@ public class ExportService {
   private String buildNumber(int[] counters, int level) {
     StringBuilder sb = new StringBuilder();
     for (int i = 0; i < level; i++) {
-      if (i > 0) sb.append('.');
+      if (i > 0)
+        sb.append('.');
       sb.append(counters[i]);
     }
     return sb.toString();
@@ -138,7 +152,29 @@ public class ExportService {
         .format(export.getFormat())
         .status(export.getStatus())
         .filePath(export.getFilePath())
+        .errorMessage(export.getErrorMessage())
         .createdAt(export.getCreatedAt())
+        .startedAt(export.getStartedAt())
+        .finishedAt(export.getFinishedAt())
         .build();
+  }
+
+  private String resolveErrorMessage(Exception ex) {
+    if (ex == null) {
+      return "导出失败：未知异常";
+    }
+    Throwable t = ex;
+    while (t.getCause() != null) {
+      t = t.getCause();
+    }
+    String msg = t.getMessage();
+    if (msg != null && !msg.isBlank()) {
+      return msg;
+    }
+    msg = ex.getMessage();
+    if (msg != null && !msg.isBlank()) {
+      return msg;
+    }
+    return ex.getClass().getSimpleName();
   }
 }

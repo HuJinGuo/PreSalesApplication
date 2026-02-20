@@ -13,5 +13,8 @@ public class ExportResponse {
   private String format;
   private ExportStatus status;
   private String filePath;
+  private String errorMessage;
   private Instant createdAt;
+  private Instant startedAt;
+  private Instant finishedAt;
 }

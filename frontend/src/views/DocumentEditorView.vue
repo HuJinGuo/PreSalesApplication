@@ -108,7 +108,9 @@
         <el-tabs v-model="rightTab">
           <el-tab-pane label="版本历史" name="versions">
             <el-table :data="versions" height="480">
-              <el-table-column prop="sourceType" label="来源" width="100" />
+              <el-table-column label="版本号" width="100">
+                <template #default="scope">V{{ versions.length - scope.$index }}</template>
+              </el-table-column>
               <el-table-column prop="summary" label="摘要" />
               <el-table-column label="保存时间" width="180">
                 <template #default="scope">{{ formatDateTime(scope.row.createdAt) }}</template>
@@ -523,12 +525,16 @@ const handleEditorShellClick = (event: MouseEvent) => {
 }
 
 const persistVersion = async (summary: string, showMessage: boolean) => {
-  if (!currentSection.value || saving.value || !dirty.value) return
+  if (!currentSection.value || !document.value || saving.value || !dirty.value) return
   try {
     saving.value = true
+    // 章节层仅保存当前内容（覆盖式），避免产生章节级历史
     const { data } = await api.createVersion(currentSection.value.id, { content: content.value, summary })
     currentSection.value.currentVersionId = data.id
-    versions.value = [data, ...versions.value.filter(v => v.id !== data.id)]
+    // 文档层生成一次快照版本，作为唯一历史来源
+    await api.createDocumentVersion(document.value.id, { summary })
+    const verRes = await api.listDocumentVersions(document.value.id)
+    versions.value = verRes.data || []
     lastSavedContent.value = content.value
     dirty.value = false
     lastSavedAt.value = Date.now()
@@ -564,14 +570,14 @@ const load = async () => {
   document.value = docRes.data
   const treeRes = await api.listSectionTree(docId)
   sectionTree.value = treeRes.data
+  const verRes = await api.listDocumentVersions(docId)
+  versions.value = verRes.data || []
   const tplRes = await api.listSectionTemplates()
   templates.value = tplRes.data
 }
 const handleSelect = async (node: any) => {
   if (!(await confirmLeaveIfDirty())) return
   currentSection.value = node
-  const res = await api.listVersions(node.id)
-  versions.value = res.data
   if (node.currentVersionId) {
     const v = await api.getVersion(node.id, node.currentVersionId)
     setProgrammaticContent(normalizeToHtml(v.data.content || ''))
@@ -674,7 +680,6 @@ const deleteSectionNode = async (node: any) => {
     if (currentSection.value?.id === node.id) {
       currentSection.value = null
       content.value = ''
-      versions.value = []
       dirty.value = false
       lastSavedContent.value = ''
     }
@@ -712,10 +717,17 @@ const unlockSection = async () => {
 }
 const loadVersion = async (row: any) => {
   if (!(await confirmLeaveIfDirty())) return
-  const res = await api.getVersion(currentSection.value.id, row.id)
-  setProgrammaticContent(normalizeToHtml(res.data.content || ''))
-  if (res.data.createdAt) {
-    lastSavedAt.value = new Date(res.data.createdAt).getTime()
+  if (!document.value || !currentSection.value) return
+  const res = await api.getDocumentVersion(document.value.id, row.id)
+  const snapshot = safeParseSnapshot(res.data?.snapshotJson)
+  const sectionItem = (snapshot.sections || []).find((s: any) => Number(s.sectionId) === Number(currentSection.value.id))
+  if (sectionItem) {
+    setProgrammaticContent(normalizeToHtml(sectionItem.content || ''))
+    if (row.createdAt) {
+      lastSavedAt.value = new Date(row.createdAt).getTime()
+    }
+  } else {
+    ElMessage.warning('该文档版本中未找到当前章节内容')
   }
 }
 const openAssetDialog = () => {
@@ -800,6 +812,16 @@ const formatDateTime = (value: string) => {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '-'
   return d.toLocaleString()
+}
+const safeParseSnapshot = (json: string) => {
+  if (!json) return { sections: [] as any[] }
+  try {
+    const parsed = JSON.parse(json)
+    if (Array.isArray(parsed?.sections)) return parsed
+    return { sections: [] as any[] }
+  } catch {
+    return { sections: [] as any[] }
+  }
 }
 
 watch(content, () => {

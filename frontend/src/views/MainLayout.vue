@@ -79,26 +79,31 @@
     </el-container>
   </el-container>
 
-  <el-dialog v-model="assistantVisible" title="AI 知识助手" width="860px" top="7vh">
+  <el-dialog v-model="assistantVisible" title="AI 知识助手" width="980px" top="5vh" class="assistant-dialog">
     <div class="assistant-panel">
-      <div class="assistant-form">
-        <el-select v-model="assistantKbId" clearable placeholder="全部知识库" style="width: 180px">
-          <el-option v-for="kb in knowledgeBases" :key="kb.id" :label="kb.name" :value="kb.id" />
-        </el-select>
-        <el-input
-          v-model="assistantQuery"
-          type="textarea"
-          :rows="3"
-          resize="none"
-          placeholder="输入你的问题，AI会自动检索知识库后再回答"
-          @keyup.enter.ctrl.exact.prevent="submitAssistantQuery"
-        />
-        <el-button type="primary" :loading="assistantLoading" @click="submitAssistantQuery">
-          检索并回答
-        </el-button>
+      <div class="assistant-form card-lite">
+        <div class="assistant-form-top">
+          <el-select v-model="assistantKbId" clearable placeholder="全部知识库" style="width: 220px">
+            <el-option v-for="kb in knowledgeBases" :key="kb.id" :label="kb.name" :value="kb.id" />
+          </el-select>
+          <div class="assistant-tip">`Ctrl + Enter` 快速提问</div>
+        </div>
+        <div class="assistant-form-bottom">
+          <el-input
+            v-model="assistantQuery"
+            type="textarea"
+            :rows="4"
+            resize="none"
+            placeholder="输入你的问题，AI会自动检索知识库后再回答"
+            @keyup.enter.ctrl.exact.prevent="submitAssistantQuery"
+          />
+          <el-button type="primary" :loading="assistantLoading" @click="submitAssistantQuery">
+            检索并回答
+          </el-button>
+        </div>
       </div>
 
-      <div class="assistant-answer" v-loading="assistantLoading">
+      <div class="assistant-answer card-lite" v-loading="assistantLoading">
         <div class="assistant-answer-title">回答</div>
         <div
           v-if="assistantAnswer"
@@ -108,9 +113,9 @@
         <div v-else class="assistant-answer-empty">还没有回答，请先提问。</div>
       </div>
 
-      <div class="assistant-citation">
+      <div class="assistant-citation card-lite">
         <div class="assistant-answer-title">知识引用</div>
-        <el-table :data="assistantCitations" size="small" max-height="260">
+        <el-table :data="assistantCitations" size="small" max-height="280">
           <el-table-column type="expand" width="56">
             <template #default="scope">
               <div class="citation-expand">
@@ -200,8 +205,8 @@ const submitAssistantQuery = async () => {
       query: assistantQuery.value,
       knowledgeBaseId: assistantKbId.value,
       topK: 8,
-      minScore: 0.12,
-      rerank: true
+      minScore: 0.03,
+      rerank: false
     })
     assistantAnswer.value = data.answer || ''
     assistantCitations.value = data.citations || []
@@ -332,7 +337,18 @@ const submitAssistantQuery = async () => {
 .assistant-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+  max-height: 82vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.card-lite {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #f9fbff);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  padding: 12px;
 }
 
 .assistant-form {
@@ -341,11 +357,28 @@ const submitAssistantQuery = async () => {
   gap: 10px;
 }
 
+.assistant-form-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assistant-form-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.assistant-tip {
+  color: #6b7a90;
+  font-size: 12px;
+}
+
 .assistant-answer {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-  padding: 10px 12px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
 }
 
 .assistant-answer-title {
@@ -357,6 +390,10 @@ const submitAssistantQuery = async () => {
 .assistant-answer-content {
   color: #334155;
   line-height: 1.7;
+  overflow: auto;
+  max-height: 44vh;
+  min-height: 140px;
+  padding-right: 6px;
 }
 
 .assistant-answer-empty {
@@ -386,14 +423,28 @@ const submitAssistantQuery = async () => {
   background: #eef2f7;
   border-radius: 4px;
   padding: 1px 4px;
+  color: #1e293b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 .markdown-body :deep(pre) {
-  background: #0f172a;
-  color: #e2e8f0;
-  border-radius: 8px;
-  padding: 10px;
+  background: #0b1736;
+  color: #e6edf7;
+  border-radius: 10px;
+  padding: 12px 14px;
   overflow-x: auto;
+  line-height: 1.6;
+}
+
+/* 代码块内 code 不能复用行内 code 的灰底样式，否则会出现“每行一条灰块” */
+.markdown-body :deep(pre code) {
+  display: block;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  white-space: pre;
+  font-size: 13px;
 }
 
 .markdown-body :deep(table) {
@@ -420,9 +471,7 @@ const submitAssistantQuery = async () => {
 }
 
 .assistant-citation {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 10px 12px;
+  padding-top: 10px;
 }
 
 .citation-expand {
@@ -447,6 +496,15 @@ const submitAssistantQuery = async () => {
   line-height: 1.5;
   max-height: 42px;
   overflow: hidden;
+}
+
+:deep(.assistant-dialog .el-dialog__header) {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #edf2f7;
+}
+
+:deep(.assistant-dialog .el-dialog__body) {
+  padding-top: 14px;
 }
 
 :deep(.el-menu-item) {

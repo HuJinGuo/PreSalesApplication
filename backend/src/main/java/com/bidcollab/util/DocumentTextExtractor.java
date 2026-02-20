@@ -19,6 +19,9 @@ import org.apache.poi.xslf.usermodel.XSLFSlide;
 import org.apache.poi.xslf.usermodel.XSLFTextShape;
 import org.apache.poi.xwpf.usermodel.IBodyElement;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFPicture;
+import org.apache.poi.xwpf.usermodel.XWPFPictureData;
+import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.springframework.stereotype.Component;
@@ -26,6 +29,60 @@ import org.springframework.web.multipart.MultipartFile;
 
 @Component
 public class DocumentTextExtractor {
+  public static class ExtractedImage {
+    private final int index;
+    private final String marker;
+    private final String fileName;
+    private final String extension;
+    private final byte[] data;
+
+    public ExtractedImage(int index, String marker, String fileName, String extension, byte[] data) {
+      this.index = index;
+      this.marker = marker;
+      this.fileName = fileName;
+      this.extension = extension;
+      this.data = data;
+    }
+
+    public int getIndex() {
+      return index;
+    }
+
+    public String getMarker() {
+      return marker;
+    }
+
+    public String getFileName() {
+      return fileName;
+    }
+
+    public String getExtension() {
+      return extension;
+    }
+
+    public byte[] getData() {
+      return data;
+    }
+  }
+
+  public static class DocxExtractionResult {
+    private final String textWithMarkers;
+    private final List<ExtractedImage> images;
+
+    public DocxExtractionResult(String textWithMarkers, List<ExtractedImage> images) {
+      this.textWithMarkers = textWithMarkers;
+      this.images = images;
+    }
+
+    public String getTextWithMarkers() {
+      return textWithMarkers;
+    }
+
+    public List<ExtractedImage> getImages() {
+      return images;
+    }
+  }
+
   // [AI-READ] 多格式文档抽取器：为分块与向量化提供统一清洗文本。
   // [AI-READ] 统一入口（上传文件场景）
   /**
@@ -69,6 +126,61 @@ public class DocumentTextExtractor {
       throw new IllegalArgumentException("Unsupported file type: " + name);
     } catch (IOException ex) {
       throw new IllegalStateException("Failed to parse file", ex);
+    }
+  }
+
+  public DocxExtractionResult extractDocxWithImageMarkers(byte[] bytes) {
+    try (XWPFDocument doc = new XWPFDocument(new ByteArrayInputStream(bytes))) {
+      StringBuilder sb = new StringBuilder();
+      List<ExtractedImage> images = new ArrayList<>();
+      int imageIndex = 1;
+      for (IBodyElement element : doc.getBodyElements()) {
+        if (element instanceof XWPFParagraph p) {
+          for (XWPFRun run : p.getRuns()) {
+            String text = run.text();
+            if (text != null && !text.isBlank()) {
+              sb.append(text);
+            }
+            for (XWPFPicture pic : run.getEmbeddedPictures()) {
+              XWPFPictureData data = pic.getPictureData();
+              if (data == null || data.getData() == null || data.getData().length == 0) {
+                continue;
+              }
+              String marker = "[[DOC_IMG_" + imageIndex + "]]";
+              sb.append(marker);
+              String ext = data.suggestFileExtension();
+              if (ext == null || ext.isBlank()) {
+                ext = "png";
+              }
+              String fileName = data.getFileName();
+              if (fileName == null || fileName.isBlank()) {
+                fileName = "image-" + imageIndex + "." + ext;
+              }
+              images.add(new ExtractedImage(imageIndex, marker, fileName, ext, data.getData()));
+              imageIndex++;
+            }
+          }
+          sb.append('\n');
+          continue;
+        }
+        if (element instanceof XWPFTable table) {
+          table.getRows().forEach(row -> {
+            List<String> cells = new ArrayList<>();
+            row.getTableCells().forEach(cell -> {
+              String txt = cell.getText();
+              if (txt != null && !txt.isBlank()) {
+                cells.add(txt.trim());
+              }
+            });
+            if (!cells.isEmpty()) {
+              sb.append(String.join(" | ", cells)).append('\n');
+            }
+          });
+        }
+      }
+      return new DocxExtractionResult(normalizeForEmbedding(sb.toString()), images);
+    } catch (IOException ex) {
+      throw new IllegalStateException("Failed to parse docx with images", ex);
     }
   }
 
@@ -132,7 +244,14 @@ public class DocumentTextExtractor {
       for (int page = 1; page <= pages; page++) {
         stripper.setStartPage(page);
         stripper.setEndPage(page);
-        String pageText = stripper.getText(document);
+        String pageText;
+        try {
+          pageText = stripper.getText(document);
+        } catch (Throwable t) {
+          // 忽略单页解析错误（如字体损坏、缺少 head table 等），避免整个文档失败
+          System.err.println("Page " + page + " extract failed: " + t.getMessage());
+          continue;
+        }
         pageTexts.add(pageText);
 
         for (String line : pageText.split("\\R")) {

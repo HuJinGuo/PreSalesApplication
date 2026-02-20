@@ -3,11 +3,17 @@ package com.bidcollab.export;
 import java.io.ByteArrayInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.util.Locale;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
@@ -15,6 +21,7 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.util.Units;
 
 public class DocxExporter {
+  private static final Pattern STYLE_WIDTH = Pattern.compile("(?i)\\bwidth\\s*:\\s*(\\d+)\\s*px");
   private final ExportImageLoader imageLoader;
 
   public DocxExporter(ExportImageLoader imageLoader) {
@@ -48,26 +55,331 @@ public class DocxExporter {
         headingRun.setText(section.getNumber() + " " + section.getTitle());
         headingRun.setBold(true);
         headingRun.setFontSize(12 + Math.max(0, 4 - section.getLevel()));
-
-        List<ExportContentBlock> blocks = ExportContentParser.parse(section.getContent());
-        if (blocks.isEmpty()) {
-          XWPFParagraph body = doc.createParagraph();
-          body.createRun().setText("");
-        }
-        for (ExportContentBlock block : blocks) {
-          if (block.isImage()) {
-            addImage(doc, block.getImage());
-          } else {
-            XWPFParagraph body = doc.createParagraph();
-            XWPFRun bodyRun = body.createRun();
-            writeMultiline(bodyRun, block.getText() == null ? "" : block.getText());
-          }
-        }
+        writeSectionContent(doc, section.getContent());
       }
 
       doc.write(out);
     }
     return outputPath;
+  }
+
+  private void writeSectionContent(XWPFDocument doc, String content) {
+    if (content == null || content.isBlank()) {
+      XWPFParagraph body = doc.createParagraph();
+      body.createRun().setText("");
+      return;
+    }
+    if (!isHtml(content)) {
+      // 兼容旧文本/标记语法：[img ...]url 与普通换行文本
+      List<ExportContentBlock> blocks = ExportContentParser.parse(content);
+      if (blocks.isEmpty()) {
+        XWPFParagraph body = doc.createParagraph();
+        body.createRun().setText("");
+        return;
+      }
+      for (ExportContentBlock block : blocks) {
+        if (block.isImage()) {
+          addImage(doc, block.getImage());
+        } else {
+          XWPFParagraph body = doc.createParagraph();
+          XWPFRun bodyRun = body.createRun();
+          writeMultiline(bodyRun, block.getText() == null ? "" : block.getText());
+        }
+      }
+      return;
+    }
+
+    Element body = Jsoup.parseBodyFragment(content).body();
+    if (body == null || body.childNodeSize() == 0) {
+      XWPFParagraph paragraph = doc.createParagraph();
+      paragraph.createRun().setText(body == null ? "" : body.text());
+      return;
+    }
+    for (Node node : body.childNodes()) {
+      appendBlockNode(doc, node, 0);
+    }
+  }
+
+  private void appendBlockNode(XWPFDocument doc, Node node, int listLevel) {
+    if (node instanceof TextNode textNode) {
+      String text = normalizeText(textNode.getWholeText());
+      if (!text.isBlank()) {
+        XWPFParagraph paragraph = doc.createParagraph();
+        paragraph.createRun().setText(text);
+      }
+      return;
+    }
+    if (!(node instanceof Element el)) {
+      return;
+    }
+
+    String tag = el.normalName();
+    if ("img".equals(tag)) {
+      addImage(doc, toImageRef(el));
+      return;
+    }
+    if ("ul".equals(tag) || "ol".equals(tag)) {
+      boolean ordered = "ol".equals(tag);
+      int index = 1;
+      for (Element li : el.children()) {
+        if (!"li".equals(li.normalName())) {
+          continue;
+        }
+        XWPFParagraph paragraph = doc.createParagraph();
+        paragraph.setIndentationLeft(Math.max(0, listLevel) * 360);
+        TextStyle base = TextStyle.normal();
+        String prefix = ordered ? (index++ + ". ") : "• ";
+        XWPFRun pRun = paragraph.createRun();
+        pRun.setText(prefix);
+        appendInlineNodes(paragraph, li.childNodes(), base, 11);
+      }
+      return;
+    }
+    if ("table".equals(tag)) {
+      for (Element tr : el.select("tr")) {
+        XWPFParagraph paragraph = doc.createParagraph();
+        String rowText = tr.select("th,td").stream().map(Element::text).reduce((a, b) -> a + " | " + b).orElse("");
+        paragraph.createRun().setText(rowText);
+      }
+      return;
+    }
+    if ("figure".equals(tag)) {
+      for (Node child : el.childNodes()) {
+        appendBlockNode(doc, child, listLevel);
+      }
+      return;
+    }
+
+    if ("h1".equals(tag) || "h2".equals(tag) || "h3".equals(tag) || "h4".equals(tag) || "h5".equals(tag) || "h6".equals(tag)
+        || "p".equals(tag) || "div".equals(tag) || "blockquote".equals(tag) || "li".equals(tag)) {
+      XWPFParagraph paragraph = doc.createParagraph();
+      paragraph.setAlignment(parseAlign(el));
+      if ("blockquote".equals(tag)) {
+        paragraph.setIndentationLeft(480);
+      }
+      int fontSize = headingFontSize(tag);
+      TextStyle style = TextStyle.normal();
+      if (tag.startsWith("h")) {
+        style.bold = true;
+      }
+      appendInlineNodes(paragraph, el.childNodes(), style, fontSize);
+      return;
+    }
+
+    for (Node child : el.childNodes()) {
+      appendBlockNode(doc, child, listLevel);
+    }
+  }
+
+  private void appendInlineNodes(XWPFParagraph paragraph, List<Node> nodes, TextStyle style, int fontSize) {
+    for (Node node : nodes) {
+      appendInlineNode(paragraph, node, style, fontSize);
+    }
+  }
+
+  private void appendInlineNode(XWPFParagraph paragraph, Node node, TextStyle style, int fontSize) {
+    if (node instanceof TextNode textNode) {
+      String text = normalizeText(textNode.getWholeText());
+      if (text.isBlank()) {
+        return;
+      }
+      XWPFRun run = paragraph.createRun();
+      applyRunStyle(run, style, fontSize);
+      run.setText(text);
+      return;
+    }
+    if (!(node instanceof Element el)) {
+      return;
+    }
+    String tag = el.normalName();
+    if ("br".equals(tag)) {
+      paragraph.createRun().addBreak();
+      return;
+    }
+    if ("img".equals(tag)) {
+      addInlineImage(paragraph, toImageRef(el));
+      return;
+    }
+    if ("ul".equals(tag) || "ol".equals(tag) || "table".equals(tag) || "figure".equals(tag)) {
+      appendBlockNode(paragraph.getDocument(), el, 1);
+      return;
+    }
+
+    TextStyle next = style.copy();
+    if ("strong".equals(tag) || "b".equals(tag)) {
+      next.bold = true;
+    }
+    if ("em".equals(tag) || "i".equals(tag)) {
+      next.italic = true;
+    }
+    if ("u".equals(tag)) {
+      next.underline = true;
+    }
+    String styleAttr = el.attr("style").toLowerCase(Locale.ROOT);
+    if (styleAttr.contains("font-weight: bold") || styleAttr.contains("font-weight:700")) {
+      next.bold = true;
+    }
+    if (styleAttr.contains("font-style: italic")) {
+      next.italic = true;
+    }
+    if (styleAttr.contains("text-decoration: underline")) {
+      next.underline = true;
+    }
+    appendInlineNodes(paragraph, el.childNodes(), next, fontSize);
+  }
+
+  private void applyRunStyle(XWPFRun run, TextStyle style, int fontSize) {
+    run.setBold(style.bold);
+    run.setItalic(style.italic);
+    run.setUnderline(style.underline ? org.apache.poi.xwpf.usermodel.UnderlinePatterns.SINGLE
+        : org.apache.poi.xwpf.usermodel.UnderlinePatterns.NONE);
+    if (fontSize > 0) {
+      run.setFontSize(fontSize);
+    }
+  }
+
+  private int headingFontSize(String tag) {
+    return switch (tag) {
+      case "h1" -> 20;
+      case "h2" -> 18;
+      case "h3" -> 16;
+      case "h4" -> 14;
+      case "h5" -> 13;
+      case "h6" -> 12;
+      default -> 11;
+    };
+  }
+
+  private ParagraphAlignment parseAlign(Element el) {
+    String align = el.attr("align");
+    if (align == null || align.isBlank()) {
+      String style = el.attr("style").toLowerCase(Locale.ROOT);
+      if (style.contains("text-align:center")) {
+        align = "center";
+      } else if (style.contains("text-align:right")) {
+        align = "right";
+      } else {
+        align = "left";
+      }
+    }
+    return toParagraphAlign(align);
+  }
+
+  private ExportImageRef toImageRef(Element img) {
+    String src = firstNonBlank(img.attr("src"), img.attr("data-href"));
+    String caption = firstNonBlank(img.attr("data-caption"), img.attr("alt"), img.attr("title"), fileName(src));
+    String align = firstNonBlank(img.attr("data-align"), parentAlign(img), styleAlign(img.attr("style")), "left");
+    Integer width = parseWidth(firstNonBlank(img.attr("data-width"), img.attr("width"), styleWidth(img.attr("style"))));
+    return ExportImageRef.builder()
+        .url(src)
+        .caption(caption)
+        .align(align)
+        .widthPx(width)
+        .build();
+  }
+
+  private void addInlineImage(XWPFParagraph paragraph, ExportImageRef ref) {
+    if (paragraph == null) {
+      return;
+    }
+    byte[] bytes = imageLoader.load(ref.getUrl());
+    if (bytes == null || bytes.length == 0) {
+      XWPFRun fallback = paragraph.createRun();
+      fallback.setText(" [图片加载失败:" + ref.getUrl() + "] ");
+      return;
+    }
+    int[] wh = detectSize(bytes, ref.getWidthPx());
+    try (InputStream in = new ByteArrayInputStream(bytes)) {
+      XWPFRun run = paragraph.createRun();
+      run.addPicture(in, pictureType(ref.getUrl()), "image", Units.toEMU(wh[0]), Units.toEMU(wh[1]));
+    } catch (Exception ex) {
+      XWPFRun fallback = paragraph.createRun();
+      fallback.setText(" [图片插入失败:" + ref.getUrl() + "] ");
+    }
+  }
+
+  private String parentAlign(Element img) {
+    Element parent = img.parent();
+    if (parent == null) {
+      return null;
+    }
+    return firstNonBlank(parent.attr("data-align"), styleAlign(parent.attr("style")));
+  }
+
+  private String styleAlign(String style) {
+    if (style == null || style.isBlank()) {
+      return null;
+    }
+    String low = style.toLowerCase(Locale.ROOT);
+    if (low.contains("margin-left:auto") && low.contains("margin-right:auto")) {
+      return "center";
+    }
+    if (low.contains("margin-left:auto")) {
+      return "right";
+    }
+    return null;
+  }
+
+  private String styleWidth(String style) {
+    if (style == null || style.isBlank()) {
+      return null;
+    }
+    Matcher matcher = STYLE_WIDTH.matcher(style);
+    return matcher.find() ? matcher.group(1) : null;
+  }
+
+  private Integer parseWidth(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    try {
+      return Integer.parseInt(raw.replaceAll("[^0-9]", ""));
+    } catch (Exception ex) {
+      return null;
+    }
+  }
+
+  private String normalizeText(String text) {
+    if (text == null) {
+      return "";
+    }
+    String normalized = text.replace('\u00A0', ' ');
+    if (normalized.trim().isEmpty()) {
+      return "";
+    }
+    return normalized.replaceAll("\\s+", " ");
+  }
+
+  private boolean isHtml(String content) {
+    if (content == null) {
+      return false;
+    }
+    return content.matches("(?s).*</?[a-zA-Z][^>]*>.*");
+  }
+
+  private String firstNonBlank(String... values) {
+    if (values == null) {
+      return null;
+    }
+    for (String value : values) {
+      if (value != null && !value.isBlank()) {
+        return value.trim();
+      }
+    }
+    return null;
+  }
+
+  private String fileName(String src) {
+    if (src == null || src.isBlank()) {
+      return null;
+    }
+    String cleaned = src;
+    int q = cleaned.indexOf('?');
+    if (q >= 0) cleaned = cleaned.substring(0, q);
+    int hash = cleaned.indexOf('#');
+    if (hash >= 0) cleaned = cleaned.substring(0, hash);
+    int slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'));
+    return slash >= 0 ? cleaned.substring(slash + 1) : cleaned;
   }
 
   private void addImage(XWPFDocument doc, ExportImageRef ref) {
@@ -140,6 +452,24 @@ public class DocxExporter {
     for (int i = 1; i < lines.length; i++) {
       run.addBreak();
       run.setText(lines[i]);
+    }
+  }
+
+  private static class TextStyle {
+    private boolean bold;
+    private boolean italic;
+    private boolean underline;
+
+    private static TextStyle normal() {
+      return new TextStyle();
+    }
+
+    private TextStyle copy() {
+      TextStyle next = new TextStyle();
+      next.bold = this.bold;
+      next.italic = this.italic;
+      next.underline = this.underline;
+      return next;
     }
   }
 }

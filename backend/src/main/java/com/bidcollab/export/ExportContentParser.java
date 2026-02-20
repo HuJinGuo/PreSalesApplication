@@ -10,6 +10,7 @@ import java.util.regex.Pattern;
 public final class ExportContentParser {
   private static final Pattern IMG_MARKER = Pattern.compile("^\\[img(?:\\s+([^\\]]+))?\\](\\S+)\\s*$", Pattern.CASE_INSENSITIVE);
   private static final Pattern IMG_TAG = Pattern.compile("(?i)<img\\b[^>]*src=[\"']([^\"']+)[\"'][^>]*>");
+  private static final Pattern MD_IMG = Pattern.compile("!\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"([^\"]*)\")?\\)");
   private static final Pattern ATTR = Pattern.compile("(\\w+)=(\"[^\"]*\"|'[^']*'|\\S+)");
 
   private ExportContentParser() {
@@ -64,7 +65,8 @@ public final class ExportContentParser {
   }
 
   private static String normalizeHtml(String content) {
-    String withMarkers = convertImgTagsToMarkers(content);
+    String withTagMarkers = convertImgTagsToMarkers(content);
+    String withMarkers = convertMarkdownImagesToMarkers(withTagMarkers);
     return withMarkers
         .replaceAll("(?i)<br\\s*/?>", "\n")
         .replaceAll("(?i)</p>", "\n")
@@ -98,6 +100,25 @@ public final class ExportContentParser {
       marker.append(" align=").append(align);
       if (alt != null && !alt.isBlank()) {
         marker.append(" caption=\"").append(alt.replace("\"", "'")).append("\"");
+      }
+      marker.append("]").append(src).append("\n");
+      matcher.appendReplacement(sb, Matcher.quoteReplacement(marker.toString()));
+    }
+    matcher.appendTail(sb);
+    return sb.toString();
+  }
+
+  private static String convertMarkdownImagesToMarkers(String content) {
+    Matcher matcher = MD_IMG.matcher(content);
+    StringBuffer sb = new StringBuffer();
+    while (matcher.find()) {
+      String alt = matcher.group(1);
+      String src = matcher.group(2);
+      String title = matcher.group(3);
+      String caption = firstNonBlank(title, alt, extractFileName(src));
+      StringBuilder marker = new StringBuilder("\n[img align=left");
+      if (caption != null && !caption.isBlank()) {
+        marker.append(" caption=\"").append(caption.replace("\"", "'")).append("\"");
       }
       marker.append("]").append(src).append("\n");
       matcher.appendReplacement(sb, Matcher.quoteReplacement(marker.toString()));
@@ -144,6 +165,26 @@ public final class ExportContentParser {
       }
     }
     return null;
+  }
+
+  private static String extractFileName(String src) {
+    if (src == null || src.isBlank()) {
+      return null;
+    }
+    String cleaned = src.trim();
+    int q = cleaned.indexOf('?');
+    if (q >= 0) {
+      cleaned = cleaned.substring(0, q);
+    }
+    int hash = cleaned.indexOf('#');
+    if (hash >= 0) {
+      cleaned = cleaned.substring(0, hash);
+    }
+    int slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'));
+    if (slash >= 0 && slash < cleaned.length() - 1) {
+      return cleaned.substring(slash + 1);
+    }
+    return cleaned;
   }
 
   private static Map<String, String> parseAttrs(String attrText) {

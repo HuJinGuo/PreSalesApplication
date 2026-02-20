@@ -55,6 +55,15 @@ export const api = {
   createVersion(sectionId: number, data: any) {
     return http.post(`/sections/${sectionId}/versions`, data)
   },
+  createDocumentVersion(documentId: number, data: any) {
+    return http.post(`/documents/${documentId}/versions`, data)
+  },
+  listDocumentVersions(documentId: number) {
+    return http.get(`/documents/${documentId}/versions`)
+  },
+  getDocumentVersion(documentId: number, versionId: number) {
+    return http.get(`/documents/${documentId}/versions/${versionId}`)
+  },
   listSectionTemplates() {
     return http.get('/section-templates')
   },
@@ -145,6 +154,9 @@ export const api = {
   },
   listKnowledgeDocuments(kbId: number) {
     return http.get(`/knowledge-bases/${kbId}/documents`)
+  },
+  listKnowledgeChunks(kbId: number) {
+    return http.get(`/knowledge-bases/${kbId}/chunks`)
   },
   getKnowledgeGraph(kbId: number) {
     return http.get(`/knowledge-bases/${kbId}/graph`)

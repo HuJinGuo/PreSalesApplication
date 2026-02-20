@@ -3,6 +3,8 @@ package com.bidcollab.controller;
 import com.bidcollab.dto.DocumentCreateRequest;
 import com.bidcollab.dto.DocumentResponse;
 import com.bidcollab.dto.DocumentUpdateRequest;
+import com.bidcollab.dto.DocumentVersionCreateRequest;
+import com.bidcollab.dto.DocumentVersionResponse;
 import com.bidcollab.service.DocumentService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -41,5 +43,21 @@ public class DocumentController {
   @PutMapping("/documents/{id}")
   public DocumentResponse update(@PathVariable("id") Long id, @RequestBody DocumentUpdateRequest request) {
     return documentService.update(id, request);
+  }
+
+  @PostMapping("/documents/{id}/versions")
+  public DocumentVersionResponse createVersion(@PathVariable("id") Long id,
+      @Valid @RequestBody DocumentVersionCreateRequest request) {
+    return documentService.createVersion(id, request);
+  }
+
+  @GetMapping("/documents/{id}/versions")
+  public List<DocumentVersionResponse> listVersions(@PathVariable("id") Long id) {
+    return documentService.listVersions(id);
+  }
+
+  @GetMapping("/documents/{id}/versions/{versionId}")
+  public DocumentVersionResponse getVersion(@PathVariable("id") Long id, @PathVariable("versionId") Long versionId) {
+    return documentService.getVersion(id, versionId);
   }
 }

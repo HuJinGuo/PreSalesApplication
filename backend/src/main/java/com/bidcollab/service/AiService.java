@@ -43,13 +43,13 @@ public class AiService {
   private final CurrentUserService currentUserService;
 
   public AiService(AiTaskRepository aiTaskRepository,
-                   SectionRepository sectionRepository,
-                   SectionVersionRepository sectionVersionRepository,
-                   KnowledgeBaseRepository knowledgeBaseRepository,
-                   KnowledgeDocumentRepository knowledgeDocumentRepository,
-                   KnowledgeBaseService knowledgeBaseService,
-                   AiClient aiClient,
-                   CurrentUserService currentUserService) {
+      SectionRepository sectionRepository,
+      SectionVersionRepository sectionVersionRepository,
+      KnowledgeBaseRepository knowledgeBaseRepository,
+      KnowledgeDocumentRepository knowledgeDocumentRepository,
+      KnowledgeBaseService knowledgeBaseService,
+      AiClient aiClient,
+      CurrentUserService currentUserService) {
     this.aiTaskRepository = aiTaskRepository;
     this.sectionRepository = sectionRepository;
     this.sectionVersionRepository = sectionVersionRepository;
@@ -113,10 +113,23 @@ public class AiService {
     return toResponse(task);
   }
 
+  /**
+   * RAG（检索增强生成）问答入口。
+   * 整体流程：解析目标知识库 → 多库向量检索 → 合并排序 → 构建上下文 → 调用 LLM 生成回答 → 组装引用列表。
+   *
+   * @param request 包含用户问题、知识库ID（可选）、检索参数等
+   * @return 包含 AI 回答、匹配片段数、引用列表的响应对象
+   */
   // [AI-READ] 检索增强问答：先检索知识片段，再让模型仅基于片段回答。
   public AiAssistantAskResponse ask(AiAssistantAskRequest request) {
+
+    // ──────────────────────────────────────────
+    // 第一步：解析目标知识库
+    // 如果请求指定了 knowledgeBaseId，则只查该库；否则检索全部知识库
+    // ──────────────────────────────────────────
     List<KnowledgeBase> targetBases = resolveTargetKnowledgeBases(request.getKnowledgeBaseId());
     if (targetBases.isEmpty()) {
+      // 无可用知识库时直接返回提示，避免后续无意义的检索
       return AiAssistantAskResponse.builder()
           .answer("当前没有可用的知识库，请先创建并导入知识文档。")
           .matchedChunkCount(0)
@@ -124,26 +137,52 @@ public class AiService {
           .build();
     }
 
+    // ──────────────────────────────────────────
+    // 第二步：遍历所有目标知识库，逐库执行向量检索
+    // allHits - 汇总所有库的检索结果
+    // chunkToKb - 记录每个 chunk 来源于哪个知识库，后续构建引用时使用
+    // ──────────────────────────────────────────
     List<KnowledgeSearchResult> allHits = new ArrayList<>();
     Map<Long, Long> chunkToKb = new HashMap<>();
     for (KnowledgeBase kb : targetBases) {
+      // 构造检索请求，设置各项召回参数
       KnowledgeSearchRequest searchRequest = new KnowledgeSearchRequest();
       searchRequest.setQuery(request.getQuery());
+      // topK: 最终返回的片段数，最低保底 4 条，默认 8 条
       searchRequest.setTopK(Math.max(4, request.getTopK() == null ? 8 : request.getTopK()));
+      // candidateTopK: 粗召回候选数（topK 的 3 倍），用于 rerank 前的预筛选
       searchRequest.setCandidateTopK(Math.max(12, searchRequest.getTopK() * 3));
-      searchRequest.setMinScore(request.getMinScore() == null ? 0.15 : request.getMinScore());
+      // minScore: 最低相似度阈值，低于此分数的片段会被过滤掉
+      searchRequest.setMinScore(request.getMinScore() == null ? 0.05 : request.getMinScore());
+      // 是否启用 rerank（二次精排），由前端控制
       searchRequest.setRerank(Boolean.TRUE.equals(request.getRerank()));
 
+      // 执行向量检索，并将结果汇总
       List<KnowledgeSearchResult> results = knowledgeBaseService.search(kb.getId(), searchRequest);
+      // 兜底重试：高阈值可能导致相关片段被过滤掉，降阈值再召回一次
+      boolean shouldRetry = shouldRetryWithLowerThreshold(request, searchRequest);
+      if (results.isEmpty() && shouldRetry) {
+        searchRequest.setMinScore(0.0);
+        searchRequest.setRerank(false);
+        searchRequest.setCandidateTopK(Math.max(searchRequest.getCandidateTopK(), 36));
+        results = knowledgeBaseService.search(kb.getId(), searchRequest);
+      }
       for (KnowledgeSearchResult item : results) {
         allHits.add(item);
+        // 建立 chunkId → knowledgeBaseId 的映射关系
         chunkToKb.put(item.getChunkId(), kb.getId());
       }
     }
 
+    // ──────────────────────────────────────────
+    // 第三步：合并排序 & 截取上下文片段
+    // 按相似度分数降序排列，取前 10 条作为 LLM 的上下文输入
+    // ──────────────────────────────────────────
     allHits.sort(Comparator.comparingDouble(KnowledgeSearchResult::getScore).reversed());
     int contextTopK = Math.min(10, allHits.size());
     List<KnowledgeSearchResult> contextHits = allHits.subList(0, contextTopK);
+
+    // 如果检索结果为空，返回友好提示
     if (contextHits.isEmpty()) {
       return AiAssistantAskResponse.builder()
           .answer("未检索到足够相关的知识片段，请调整问题关键词后重试。")
@@ -152,33 +191,51 @@ public class AiService {
           .build();
     }
 
+    // ──────────────────────────────────────────
+    // 第四步：批量查询文档元数据
+    // 通过 contextHits 中的 documentId 去重后批量加载文档信息，
+    // 用于后续在引用列表中展示文档标题等
+    // ──────────────────────────────────────────
     Map<Long, KnowledgeDocument> docById = new HashMap<>();
     for (KnowledgeDocument doc : knowledgeDocumentRepository.findAllById(
         contextHits.stream().map(KnowledgeSearchResult::getDocumentId).distinct().toList())) {
       docById.put(doc.getId(), doc);
     }
+    // 知识库 id → 知识库对象的映射，用于引用中展示知识库名称
     Map<Long, KnowledgeBase> kbById = new HashMap<>();
     for (KnowledgeBase kb : targetBases) {
       kbById.put(kb.getId(), kb);
     }
 
+    // ──────────────────────────────────────────
+    // 第五步：构建上下文文本 & 调用 LLM 生成回答
+    // 将检索到的知识片段拼接为结构化文本，连同用户问题一起发送给大模型
+    // ──────────────────────────────────────────
     String context = buildContext(contextHits, chunkToKb, kbById, docById);
     String answer;
     try {
+      // 系统提示词：约束模型只能基于知识片段回答，不得编造
       String systemPrompt = """
-          你是售前招标文档智能助手。你必须仅基于“知识片段”回答。
+          你是售前招标文档智能助手。你必须仅基于"知识片段"回答。
           要求：
           1) 不得编造片段中不存在的事实；
-          2) 如果信息不足，明确说“知识库暂无充分依据”；
+          2) 如果信息不足，明确说"知识库暂无充分依据"；
           3) 回答尽量结构化、简洁，并给出可执行建议；
           4) 使用中文。
           """;
+      // 用户提示词：包含原始问题和检索到的知识片段
       String userPrompt = "【用户问题】\n" + request.getQuery() + "\n\n【知识片段】\n" + context;
       answer = aiClient.chat(systemPrompt, userPrompt);
     } catch (Exception ex) {
+      // LLM 调用异常时返回兜底文案，不影响整体流程
       answer = "AI回答失败，请稍后重试。";
     }
 
+    // ──────────────────────────────────────────
+    // 第六步：组装引用（Citation）列表
+    // 取相似度最高的前 8 条片段，附带知识库名称、文档标题、片段摘要等信息，
+    // 方便前端展示回答的来源依据
+    // ──────────────────────────────────────────
     List<AiAssistantCitation> citations = contextHits.stream().limit(8).map(hit -> {
       Long kbId = chunkToKb.get(hit.getChunkId());
       KnowledgeBase kb = kbById.get(kbId);
@@ -190,10 +247,12 @@ public class AiService {
           .documentTitle(doc == null ? "未知文档" : doc.getTitle())
           .chunkId(hit.getChunkId())
           .score(hit.getScore())
+          // 截取片段内容前 220 字符作为摘要预览
           .snippet(snippet(hit.getContent(), 220))
           .build();
     }).toList();
 
+    // 返回最终响应：AI 回答 + 总匹配数 + 引用列表
     return AiAssistantAskResponse.builder()
         .answer(answer)
         .matchedChunkCount(allHits.size())
@@ -209,9 +268,9 @@ public class AiService {
   }
 
   private String buildContext(List<KnowledgeSearchResult> hits,
-                              Map<Long, Long> chunkToKb,
-                              Map<Long, KnowledgeBase> kbById,
-                              Map<Long, KnowledgeDocument> docById) {
+      Map<Long, Long> chunkToKb,
+      Map<Long, KnowledgeBase> kbById,
+      Map<Long, KnowledgeDocument> docById) {
     StringBuilder sb = new StringBuilder();
     for (int i = 0; i < hits.size(); i++) {
       KnowledgeSearchResult hit = hits.get(i);
@@ -238,6 +297,20 @@ public class AiService {
       return normalized;
     }
     return normalized.substring(0, maxLen) + "...";
+  }
+
+  /**
+   * 仅对“信息量足够、确有召回价值”的查询触发二次重试，避免大库场景每次都双重检索。
+   */
+  private boolean shouldRetryWithLowerThreshold(AiAssistantAskRequest request, KnowledgeSearchRequest searchRequest) {
+    if (searchRequest.getMinScore() == null || searchRequest.getMinScore() <= 0.0) {
+      return false;
+    }
+    String query = request.getQuery() == null ? "" : request.getQuery().trim();
+    int effectiveLen = query.replaceAll("\\s+", "").length();
+    int topK = request.getTopK() == null ? 8 : request.getTopK();
+    // 查询较长或期望召回较多时再重试
+    return effectiveLen >= 8 || topK >= 6;
   }
 
   private AiTaskResponse toResponse(AiTask task) {
