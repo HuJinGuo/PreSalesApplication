@@ -15,16 +15,19 @@ import lombok.Setter;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
-@Table(name = "document_version")
-public class DocumentVersion extends BaseEntity {
-  @Column(name = "document_id", nullable = false)
-  private Long documentId;
+@Table(name = "knowledge_base_dictionary_pack")
+public class KnowledgeBaseDictionaryPack extends BaseEntity {
+  @Column(name = "knowledge_base_id", nullable = false)
+  private Long knowledgeBaseId;
 
-  @Column(length = 255)
-  private String summary;
+  @Column(name = "pack_id", nullable = false)
+  private Long packId;
 
-  @Column(name = "snapshot_json", columnDefinition = "LONGTEXT", nullable = false)
-  private String snapshotJson;
+  @Column(nullable = false)
+  private Boolean enabled;
+
+  @Column(nullable = false)
+  private Integer priority;
 
   @Column(name = "created_by")
   private Long createdBy;

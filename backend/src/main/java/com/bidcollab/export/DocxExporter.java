@@ -18,6 +18,9 @@ import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.apache.poi.xwpf.usermodel.XWPFTableCell;
+import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.apache.poi.util.Units;
 
 public class DocxExporter {
@@ -37,20 +40,9 @@ public class DocxExporter {
       titleRun.setBold(true);
       titleRun.setFontSize(16);
 
-      XWPFParagraph tocTitle = doc.createParagraph();
-      XWPFRun tocRun = tocTitle.createRun();
-      tocRun.setText("目录");
-      tocRun.setBold(true);
-      tocRun.setFontSize(14);
-
-      for (FlattenedSection section : sections) {
-        XWPFParagraph tocItem = doc.createParagraph();
-        XWPFRun tocItemRun = tocItem.createRun();
-        tocItemRun.setText(section.getNumber() + " " + section.getTitle());
-      }
-
       for (FlattenedSection section : sections) {
         XWPFParagraph heading = doc.createParagraph();
+        applyHeadingStyle(heading, section.getLevel());
         XWPFRun headingRun = heading.createRun();
         headingRun.setText(section.getNumber() + " " + section.getTitle());
         headingRun.setBold(true);
@@ -61,6 +53,11 @@ public class DocxExporter {
       doc.write(out);
     }
     return outputPath;
+  }
+
+  private void applyHeadingStyle(XWPFParagraph heading, int level) {
+    int lv = Math.max(1, Math.min(level, 6));
+    heading.setStyle("Heading" + lv);
   }
 
   private void writeSectionContent(XWPFDocument doc, String content) {
@@ -136,11 +133,7 @@ public class DocxExporter {
       return;
     }
     if ("table".equals(tag)) {
-      for (Element tr : el.select("tr")) {
-        XWPFParagraph paragraph = doc.createParagraph();
-        String rowText = tr.select("th,td").stream().map(Element::text).reduce((a, b) -> a + " | " + b).orElse("");
-        paragraph.createRun().setText(rowText);
-      }
+      appendTable(doc, el);
       return;
     }
     if ("figure".equals(tag)) {
@@ -225,6 +218,10 @@ public class DocxExporter {
     if (styleAttr.contains("text-decoration: underline")) {
       next.underline = true;
     }
+    String color = parseCssColor(styleAttr);
+    if (color != null) {
+      next.colorHex = color;
+    }
     appendInlineNodes(paragraph, el.childNodes(), next, fontSize);
   }
 
@@ -233,9 +230,82 @@ public class DocxExporter {
     run.setItalic(style.italic);
     run.setUnderline(style.underline ? org.apache.poi.xwpf.usermodel.UnderlinePatterns.SINGLE
         : org.apache.poi.xwpf.usermodel.UnderlinePatterns.NONE);
+    if (style.colorHex != null && !style.colorHex.isBlank()) {
+      run.setColor(style.colorHex);
+    }
     if (fontSize > 0) {
       run.setFontSize(fontSize);
     }
+  }
+
+  private void appendTable(XWPFDocument doc, Element tableEl) {
+    List<Element> rows = tableEl.select("> thead > tr, > tbody > tr, > tr");
+    if (rows.isEmpty()) {
+      rows = tableEl.select("tr");
+    }
+    if (rows.isEmpty()) {
+      return;
+    }
+
+    int colCount = rows.stream()
+        .mapToInt(r -> r.select("> th, > td").size())
+        .max()
+        .orElse(1);
+    colCount = Math.max(1, colCount);
+
+    XWPFTable table = doc.createTable(rows.size(), colCount);
+    table.setWidth("100%");
+
+    for (int r = 0; r < rows.size(); r++) {
+      Element tr = rows.get(r);
+      List<Element> cells = tr.select("> th, > td");
+      XWPFTableRow row = table.getRow(r);
+      for (int c = 0; c < colCount; c++) {
+        XWPFTableCell cell = row.getCell(c);
+        while (cell.getParagraphs().size() > 0) {
+          cell.removeParagraph(0);
+        }
+        XWPFParagraph paragraph = cell.addParagraph();
+        TextStyle base = TextStyle.normal();
+        if (c < cells.size()) {
+          Element td = cells.get(c);
+          if ("th".equals(td.normalName())) {
+            base.bold = true;
+          }
+          appendInlineNodes(paragraph, td.childNodes(), base, 11);
+          if (paragraph.getRuns().isEmpty()) {
+            paragraph.createRun().setText(normalizeText(td.text()));
+          }
+        } else {
+          paragraph.createRun().setText("");
+        }
+      }
+    }
+  }
+
+  private String parseCssColor(String styleAttr) {
+    if (styleAttr == null || styleAttr.isBlank()) {
+      return null;
+    }
+    String style = styleAttr.toLowerCase(Locale.ROOT);
+    Matcher hex = Pattern.compile("color\\s*:\\s*#([0-9a-f]{3}|[0-9a-f]{6})").matcher(style);
+    if (hex.find()) {
+      String value = hex.group(1);
+      if (value.length() == 3) {
+        return ("" + value.charAt(0) + value.charAt(0)
+            + value.charAt(1) + value.charAt(1)
+            + value.charAt(2) + value.charAt(2)).toUpperCase(Locale.ROOT);
+      }
+      return value.toUpperCase(Locale.ROOT);
+    }
+    Matcher rgb = Pattern.compile("color\\s*:\\s*rgb\\s*\\(\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*\\)").matcher(style);
+    if (rgb.find()) {
+      int r = Math.min(255, Math.max(0, Integer.parseInt(rgb.group(1))));
+      int g = Math.min(255, Math.max(0, Integer.parseInt(rgb.group(2))));
+      int b = Math.min(255, Math.max(0, Integer.parseInt(rgb.group(3))));
+      return String.format("%02X%02X%02X", r, g, b);
+    }
+    return null;
   }
 
   private int headingFontSize(String tag) {
@@ -459,6 +529,7 @@ public class DocxExporter {
     private boolean bold;
     private boolean italic;
     private boolean underline;
+    private String colorHex;
 
     private static TextStyle normal() {
       return new TextStyle();
@@ -469,6 +540,7 @@ public class DocxExporter {
       next.bold = this.bold;
       next.italic = this.italic;
       next.underline = this.underline;
+      next.colorHex = this.colorHex;
       return next;
     }
   }

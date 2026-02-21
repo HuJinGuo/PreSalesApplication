@@ -100,7 +100,7 @@ public class SectionTemplateService {
   }
 
   private int nextSortIndex(Long documentId, Long parentId) {
-    List<Section> sections = sectionRepository.findByDocumentIdOrderBySortIndexAsc(documentId);
+    List<Section> sections = sectionRepository.findTreeByDocumentId(documentId);
     return sections.stream()
         .filter(s -> {
           Long p = s.getParent() == null ? null : s.getParent().getId();
@@ -112,7 +112,7 @@ public class SectionTemplateService {
   }
 
   private List<SectionTemplateNode> extractStructureFromDocument(Long documentId) {
-    List<Section> sections = sectionRepository.findByDocumentIdOrderBySortIndexAsc(documentId);
+    List<Section> sections = sectionRepository.findTreeByDocumentId(documentId);
     Map<Long, SectionTemplateNode> map = new HashMap<>();
     List<SectionTemplateNode> roots = new ArrayList<>();
     sections.forEach(section -> {
@@ -160,4 +160,3 @@ public class SectionTemplateService {
         .build();
   }
 }
-

@@ -73,13 +73,13 @@
               </el-button>
             </div>
             <div class="status">
-              状态：{{ currentSection.status }} | 字数：{{ textLength }} | {{ autosaveText }}
+              状态：{{ currentSection.status }} | 字数：{{ textLength }} | {{ saveStatusText }}
             </div>
           </div>
           <div class="actions">
             <el-button size="small" @click="lockSection">锁定</el-button>
             <el-button size="small" @click="unlockSection">解锁</el-button>
-            <el-button size="small" type="primary" :loading="saving" @click="saveVersion">保存版本</el-button>
+            <el-button size="small" type="primary" :loading="saving" @click="saveCurrentSection">保存（Ctrl+S）</el-button>
           </div>
         </div>
 
@@ -106,22 +106,6 @@
 
       <div class="card versions" v-if="currentSection">
         <el-tabs v-model="rightTab">
-          <el-tab-pane label="版本历史" name="versions">
-            <el-table :data="versions" height="480">
-              <el-table-column label="版本号" width="100">
-                <template #default="scope">V{{ versions.length - scope.$index }}</template>
-              </el-table-column>
-              <el-table-column prop="summary" label="摘要" />
-              <el-table-column label="保存时间" width="180">
-                <template #default="scope">{{ formatDateTime(scope.row.createdAt) }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="120">
-                <template #default="scope">
-                  <el-button size="small" @click="loadVersion(scope.row)">查看</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-tab-pane>
           <el-tab-pane label="图片属性" name="image">
             <div class="image-panel">
               <div class="image-list-title">当前章节图片（{{ images.length }}）</div>
@@ -271,7 +255,6 @@ const router = useRouter()
 const document = ref<any>(null)
 const sectionTree = ref<any[]>([])
 const currentSection = ref<any>(null)
-const versions = ref<any[]>([])
 const content = ref('')
 const editorRef = shallowRef<IDomEditor>()
 const editorShellRef = ref<HTMLElement | null>(null)
@@ -281,7 +264,7 @@ const showAssetDialog = ref(false)
 const showApplyTemplate = ref(false)
 const showSaveTemplate = ref(false)
 const templates = ref<any[]>([])
-const rightTab = ref<'versions' | 'image'>('versions')
+const rightTab = ref<'image'>('image')
 const images = ref<ImageMeta[]>([])
 const selectedImageIndex = ref(-1)
 const imageForm = reactive({
@@ -305,8 +288,8 @@ const textLength = computed(() => {
   return (editorRef.value.getText() || '').trim().length
 })
 const selectedImage = computed(() => images.value.find(item => item.index === selectedImageIndex.value) || null)
-const autosaveText = computed(() => {
-  if (saving.value) return '自动保存中...'
+const saveStatusText = computed(() => {
+  if (saving.value) return '保存中...'
   if (dirty.value) return '有未保存修改'
   if (lastSavedAt.value) return `最近保存：${new Date(lastSavedAt.value).toLocaleTimeString()}`
   return '尚未保存'
@@ -524,21 +507,23 @@ const handleEditorShellClick = (event: MouseEvent) => {
   } catch { /* 忽略罕见的 DOM 不一致 */ }
 }
 
-const persistVersion = async (summary: string, showMessage: boolean) => {
-  if (!currentSection.value || !document.value || saving.value || !dirty.value) return
+const persistCurrentSection = async (summary: string, showMessage: boolean) => {
+  if (!currentSection.value || saving.value) return
+  if (!dirty.value) {
+    if (showMessage) {
+      ElMessage.info('当前无变更，无需保存')
+    }
+    return
+  }
   try {
     saving.value = true
-    // 章节层仅保存当前内容（覆盖式），避免产生章节级历史
+    // 章节层仅保存当前内容（覆盖式），避免高频操作导致版本爆炸
     const { data } = await api.createVersion(currentSection.value.id, { content: content.value, summary })
     currentSection.value.currentVersionId = data.id
-    // 文档层生成一次快照版本，作为唯一历史来源
-    await api.createDocumentVersion(document.value.id, { summary })
-    const verRes = await api.listDocumentVersions(document.value.id)
-    versions.value = verRes.data || []
     lastSavedContent.value = content.value
     dirty.value = false
     lastSavedAt.value = Date.now()
-    if (showMessage) ElMessage.success('版本已保存')
+    if (showMessage) ElMessage.success('已保存')
   } catch (err: any) {
     if (showMessage) {
       ElMessage.error(err?.response?.data?.message || '保存失败')
@@ -546,9 +531,6 @@ const persistVersion = async (summary: string, showMessage: boolean) => {
   } finally {
     saving.value = false
   }
-}
-const handleWindowBlur = async () => {
-  await persistVersion('窗口失焦自动保存', false)
 }
 const confirmLeaveIfDirty = async () => {
   if (!dirty.value || saving.value) return true
@@ -570,8 +552,6 @@ const load = async () => {
   document.value = docRes.data
   const treeRes = await api.listSectionTree(docId)
   sectionTree.value = treeRes.data
-  const verRes = await api.listDocumentVersions(docId)
-  versions.value = verRes.data || []
   const tplRes = await api.listSectionTemplates()
   templates.value = tplRes.data
 }
@@ -702,8 +682,8 @@ const createSection = async () => {
     ElMessage.error('章节创建失败')
   }
 }
-const saveVersion = async () => {
-  await persistVersion('手动保存', true)
+const saveCurrentSection = async () => {
+  await persistCurrentSection('手动保存', true)
 }
 const lockSection = async () => {
   if (!currentSection.value) return
@@ -714,21 +694,6 @@ const unlockSection = async () => {
   if (!currentSection.value) return
   await api.unlockSection(currentSection.value.id)
   ElMessage.success('已解锁')
-}
-const loadVersion = async (row: any) => {
-  if (!(await confirmLeaveIfDirty())) return
-  if (!document.value || !currentSection.value) return
-  const res = await api.getDocumentVersion(document.value.id, row.id)
-  const snapshot = safeParseSnapshot(res.data?.snapshotJson)
-  const sectionItem = (snapshot.sections || []).find((s: any) => Number(s.sectionId) === Number(currentSection.value.id))
-  if (sectionItem) {
-    setProgrammaticContent(normalizeToHtml(sectionItem.content || ''))
-    if (row.createdAt) {
-      lastSavedAt.value = new Date(row.createdAt).getTime()
-    }
-  } else {
-    ElMessage.warning('该文档版本中未找到当前章节内容')
-  }
 }
 const openAssetDialog = () => {
   if (!currentSection.value) return
@@ -746,7 +711,14 @@ const createAsset = async () => {
 }
 const aiRewrite = async () => {
   if (!currentSection.value) return
-  await persistVersion('AI改写前自动保存', false)
+  if (dirty.value) {
+    ElMessage.warning('请先保存当前章节，再执行 AI 改写')
+    return
+  }
+  if (!currentSection.value.currentVersionId) {
+    ElMessage.warning('请先保存当前章节，再执行 AI 改写')
+    return
+  }
   try {
     const res = await api.aiRewrite({
       sectionId: currentSection.value.id,
@@ -761,7 +733,10 @@ const aiRewrite = async () => {
 }
 const submitReview = async () => {
   if (!currentSection.value) return
-  await persistVersion('提交审核前自动保存', false)
+  if (dirty.value) {
+    ElMessage.warning('请先保存当前章节，再提交审核')
+    return
+  }
   if (!currentSection.value.currentVersionId) return
   try {
     await api.submitReview(currentSection.value.id, {
@@ -807,21 +782,12 @@ const onBeforeUnload = (event: BeforeUnloadEvent) => {
   event.preventDefault()
   event.returnValue = ''
 }
-const formatDateTime = (value: string) => {
-  if (!value) return '-'
-  const d = new Date(value)
-  if (Number.isNaN(d.getTime())) return '-'
-  return d.toLocaleString()
-}
-const safeParseSnapshot = (json: string) => {
-  if (!json) return { sections: [] as any[] }
-  try {
-    const parsed = JSON.parse(json)
-    if (Array.isArray(parsed?.sections)) return parsed
-    return { sections: [] as any[] }
-  } catch {
-    return { sections: [] as any[] }
-  }
+
+const handleEditorShortcut = async (event: KeyboardEvent) => {
+  const isSave = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's'
+  if (!isSave) return
+  event.preventDefault()
+  await saveCurrentSection()
 }
 
 watch(content, () => {
@@ -850,14 +816,14 @@ onBeforeRouteLeave(async (_to, _from, next) => {
 onMounted(async () => {
   await load()
   window.addEventListener('beforeunload', onBeforeUnload)
-  window.addEventListener('blur', handleWindowBlur)
+  window.addEventListener('keydown', handleEditorShortcut)
 })
 
 onBeforeUnmount(() => {
   if (imageSyncTimer) window.clearTimeout(imageSyncTimer)
   if (applyTimer) window.clearTimeout(applyTimer)
   window.removeEventListener('beforeunload', onBeforeUnload)
-  window.removeEventListener('blur', handleWindowBlur)
+  window.removeEventListener('keydown', handleEditorShortcut)
   editorRef.value?.destroy()
 })
 </script>

@@ -11,6 +11,7 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -29,7 +30,7 @@ public class ExportController {
 
   @PostMapping("/documents/{documentId}/export")
   public ExportResponse export(@PathVariable("documentId") Long documentId, @Valid @RequestBody ExportRequest request) {
-    return exportService.export(documentId, request.getFormat());
+    return exportService.export(documentId, request.getFormat(), request.getVersionNo());
   }
 
   @GetMapping("/documents/{documentId}/exports")
@@ -47,13 +48,23 @@ public class ExportController {
     if (!file.exists()) {
       return ResponseEntity.notFound().build();
     }
-    MediaType mediaType = export.getFormat().equalsIgnoreCase("pdf")
-        ? MediaType.APPLICATION_PDF
-        : MediaType.APPLICATION_OCTET_STREAM;
+    MediaType mediaType;
+    if ("pdf".equalsIgnoreCase(export.getFormat())) {
+      mediaType = MediaType.APPLICATION_PDF;
+    } else if ("docx".equalsIgnoreCase(export.getFormat())) {
+      mediaType = MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    } else {
+      mediaType = MediaType.APPLICATION_OCTET_STREAM;
+    }
     return ResponseEntity.ok()
         .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getName() + "\"")
         .contentLength(file.length())
         .contentType(mediaType)
         .body(new FileSystemResource(file));
+  }
+
+  @DeleteMapping("/exports/{exportId}")
+  public void delete(@PathVariable("exportId") Long exportId) {
+    exportService.deleteExport(exportId);
   }
 }

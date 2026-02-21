@@ -1,0 +1,73 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://120.27.212.35:13307/ai_smart?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: qwe123999mn@123
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+    open-in-view: false
+  sql:
+    init:
+      mode: never
+      schema-locations: classpath:init.sql
+  flyway:
+    enabled: false
+    baseline-on-migrate: true
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 120MB
+
+app:
+  knowledge:
+    storage-dir: /tmp/bid-knowledge-files
+    embedding-concurrency: 6
+    reindex-concurrency: 2
+  upload:
+    storage-dir: /tmp/bid-doc-uploads
+  ai:
+    provider: MOCK
+    chat-provider: openai
+    embedding-provider: alibaba
+    chat-model: nvidia/nemotron-3-nano-30b-a3b
+    # chat-model: z-ai/glm5
+    embedding-model: multimodal-embedding-v1
+    keyword-model: glm-5
+    openai:
+      base-url: https://integrate.api.nvidia.com/v1
+      api-key: 
+    alibaba:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api-key: 
+    baidu:
+      auth-url: https://aip.baidubce.com/oauth/2.0/token
+      chat-url: https://qianfan.baidubce.com/v2/chat/completions
+      embedding-url: https://qianfan.baidubce.com/v2/embeddings
+      api-key:
+      secret-key:
+    self-hosted:
+      base-url: http://localhost:8000/v1
+      api-key:
+  security:
+    jwt:
+      secret: "change-this-to-a-long-random-string"
+      expire-minutes: 720
+  export:
+    base-dir: /tmp/bid-doc-downloads
+  exam:
+    repeat-strategy: ALL
+
+logging:
+  level:
+    root: INFO
+    com.bidcollab: DEBUG
+    org.springframework.web: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE

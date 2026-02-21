@@ -32,6 +32,9 @@ public class User extends BaseEntity {
   @Column(length = 128)
   private String dept;
 
+  @Column(name = "department_id")
+  private Long departmentId;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 32, columnDefinition = "VARCHAR(32)")
   private UserStatus status;

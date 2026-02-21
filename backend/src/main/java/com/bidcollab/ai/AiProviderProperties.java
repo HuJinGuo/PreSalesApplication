@@ -12,6 +12,7 @@ public class AiProviderProperties {
   private AiProviderType embeddingProvider;
   private String chatModel = "gpt-4o-mini";
   private String embeddingModel = "text-embedding-3-small";
+  private String keywordModel = "glm-5";
 
   private OpenAi openAi = new OpenAi();
   private Alibaba alibaba = new Alibaba();

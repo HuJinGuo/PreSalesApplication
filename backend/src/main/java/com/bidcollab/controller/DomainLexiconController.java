@@ -1,7 +1,15 @@
 package com.bidcollab.controller;
 
+import com.bidcollab.dto.DictionaryBatchUpsertRequest;
+import com.bidcollab.dto.DictionaryBatchUpsertResponse;
+import com.bidcollab.dto.DictionaryEntryRequest;
+import com.bidcollab.dto.DictionaryEntryResponse;
+import com.bidcollab.dto.DictionaryPackRequest;
+import com.bidcollab.dto.DictionaryPackResponse;
 import com.bidcollab.dto.DomainLexiconUpsertRequest;
 import com.bidcollab.dto.DomainLexiconUpdateRequest;
+import com.bidcollab.dto.KnowledgeBaseDictionaryPackBindRequest;
+import com.bidcollab.dto.KnowledgeBaseDictionaryPackResponse;
 import com.bidcollab.dto.KnowledgeLexiconResponse;
 import com.bidcollab.service.DomainLexiconService;
 import jakarta.validation.Valid;
@@ -25,6 +33,81 @@ public class DomainLexiconController {
     this.service = service;
   }
 
+  // ===== 词典中心（全局词典包） =====
+  @GetMapping("/packs")
+  public List<DictionaryPackResponse> listPacks() {
+    return service.listPacks();
+  }
+
+  @PostMapping("/packs")
+  public DictionaryPackResponse createPack(@Valid @RequestBody DictionaryPackRequest request) {
+    return service.createPack(request);
+  }
+
+  @PutMapping("/packs/{packId}")
+  public DictionaryPackResponse updatePack(@PathVariable("packId") Long packId, @Valid @RequestBody DictionaryPackRequest request) {
+    return service.updatePack(packId, request);
+  }
+
+  @DeleteMapping("/packs/{packId}")
+  public void deletePack(@PathVariable("packId") Long packId) {
+    service.deletePack(packId);
+  }
+
+  @GetMapping("/packs/{packId}/entries")
+  public List<DictionaryEntryResponse> listPackEntries(@PathVariable("packId") Long packId) {
+    return service.listPackEntries(packId);
+  }
+
+  @PostMapping("/packs/{packId}/entries")
+  public DictionaryEntryResponse upsertPackEntry(@PathVariable("packId") Long packId,
+      @Valid @RequestBody DictionaryEntryRequest request) {
+    return service.upsertPackEntry(packId, request, "MANUAL");
+  }
+
+  @PutMapping("/entries/{entryId}")
+  public DictionaryEntryResponse updatePackEntry(@PathVariable("entryId") Long entryId,
+      @Valid @RequestBody DictionaryEntryRequest request) {
+    return service.updatePackEntry(entryId, request);
+  }
+
+  @DeleteMapping("/entries/{entryId}")
+  public void deletePackEntry(@PathVariable("entryId") Long entryId) {
+    service.deletePackEntry(entryId);
+  }
+
+  @PostMapping("/packs/{packId}/entries/batch-upsert")
+  public DictionaryBatchUpsertResponse batchUpsert(
+      @PathVariable("packId") Long packId,
+      @Valid @RequestBody DictionaryBatchUpsertRequest request) {
+    return service.batchUpsertPackEntries(packId, request);
+  }
+
+  // ===== 知识库引入词典包 =====
+  @GetMapping("/knowledge-bases/{knowledgeBaseId}/packs")
+  public List<KnowledgeBaseDictionaryPackResponse> listKbPacks(@PathVariable("knowledgeBaseId") Long knowledgeBaseId) {
+    return service.listKnowledgeBasePacks(knowledgeBaseId);
+  }
+
+  @PostMapping("/knowledge-bases/{knowledgeBaseId}/packs/{packId}")
+  public KnowledgeBaseDictionaryPackResponse bindPack(
+      @PathVariable("knowledgeBaseId") Long knowledgeBaseId,
+      @PathVariable("packId") Long packId,
+      @RequestBody(required = false) KnowledgeBaseDictionaryPackBindRequest request) {
+    if (request == null) {
+      request = new KnowledgeBaseDictionaryPackBindRequest();
+    }
+    return service.bindPackToKnowledgeBase(knowledgeBaseId, packId, request);
+  }
+
+  @DeleteMapping("/knowledge-bases/{knowledgeBaseId}/packs/{packId}")
+  public void unbindPack(
+      @PathVariable("knowledgeBaseId") Long knowledgeBaseId,
+      @PathVariable("packId") Long packId) {
+    service.unbindPackFromKnowledgeBase(knowledgeBaseId, packId);
+  }
+
+  // ===== 兼容旧接口（知识库本地词条） =====
   @GetMapping
   public List<KnowledgeLexiconResponse> list(@RequestParam("knowledgeBaseId") Long knowledgeBaseId) {
     return service.list(knowledgeBaseId);

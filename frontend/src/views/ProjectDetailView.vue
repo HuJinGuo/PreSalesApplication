@@ -21,18 +21,11 @@
       <el-table :data="pagedDocuments" style="width: 100%">
         <el-table-column prop="name" label="文档名称" />
         <el-table-column prop="docType" label="类型" width="160" />
-        <el-table-column label="操作" width="230">
+        <el-table-column label="操作" width="280">
           <template #default="scope">
             <el-button size="small" @click="openDoc(scope.row)">编辑</el-button>
-            <el-dropdown @command="(format: string | number) => triggerExport(scope.row, String(format))">
-              <el-button size="small" :loading="exportingDocId === scope.row.id">导出</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="docx">导出 DOCX</el-dropdown-item>
-                  <el-dropdown-item command="pdf">导出 PDF</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <el-button size="small" :loading="exportingDocId === scope.row.id" @click="openExportDialog(scope.row)">导出</el-button>
+            <el-button size="small" type="danger" @click="deleteDocument(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -54,6 +47,7 @@
       </div>
       <el-table :data="pagedExports" style="width: 100%">
         <el-table-column prop="documentName" label="所属文档" min-width="180" />
+        <el-table-column prop="versionNo" label="版本号" width="120" />
         <el-table-column prop="format" label="格式" width="110" />
         <el-table-column prop="status" label="状态" width="120" />
         <el-table-column prop="errorMessage" label="失败原因" min-width="220" />
@@ -63,7 +57,7 @@
         <el-table-column label="完成时间" width="180">
           <template #default="scope">{{ formatDateTime(scope.row.finishedAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="130">
+        <el-table-column label="操作" width="180">
           <template #default="scope">
             <el-button
               size="small"
@@ -72,6 +66,7 @@
             >
               下载
             </el-button>
+            <el-button size="small" type="danger" @click="deleteExport(scope.row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -101,13 +96,34 @@
         <el-button type="primary" @click="createDocument">创建</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showExportDialog" title="导出文档" width="480px">
+      <el-form :model="exportForm" label-width="84px">
+        <el-form-item label="文档">
+          <el-input :model-value="exportForm.documentName" disabled />
+        </el-form-item>
+        <el-form-item label="导出格式">
+          <el-select v-model="exportForm.format" style="width: 100%">
+            <el-option label="Word (DOCX)" value="docx" />
+            <el-option label="PDF" value="pdf" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="版本号">
+          <el-input v-model="exportForm.versionNo" placeholder="如 V1.0.3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showExportDialog = false">取消</el-button>
+        <el-button type="primary" :loading="exportingDocId === exportForm.documentId" @click="submitExport">确定导出</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 
 const route = useRoute()
@@ -116,6 +132,7 @@ const project = ref<any>(null)
 const documents = ref<any[]>([])
 const exportRows = ref<any[]>([])
 const showCreate = ref(false)
+const showExportDialog = ref(false)
 const docPage = ref(1)
 const docPageSize = ref(10)
 const exportPage = ref(1)
@@ -125,6 +142,12 @@ const exportingDocId = ref<number | null>(null)
 const docForm = reactive({
   name: '',
   docType: ''
+})
+const exportForm = reactive({
+  documentId: 0,
+  documentName: '',
+  format: 'docx',
+  versionNo: ''
 })
 const pagedDocuments = computed(() => {
   const start = (docPage.value - 1) * docPageSize.value
@@ -188,20 +211,70 @@ const openDoc = (doc: any) => {
   router.push(`/documents/${doc.id}/edit`)
 }
 
-const triggerExport = async (doc: any, format: string) => {
+const openExportDialog = (doc: any) => {
+  exportForm.documentId = doc.id
+  exportForm.documentName = doc.name
+  exportForm.format = 'docx'
+  exportForm.versionNo = ''
+  showExportDialog.value = true
+}
+
+const submitExport = async () => {
   try {
-    exportingDocId.value = doc.id
-    const { data } = await api.exportDocument(doc.id, { format })
+    if (!exportForm.versionNo.trim()) {
+      ElMessage.warning('请输入版本号')
+      return
+    }
+    exportingDocId.value = exportForm.documentId
+    const { data } = await api.exportDocument(exportForm.documentId, {
+      format: exportForm.format,
+      versionNo: exportForm.versionNo.trim()
+    })
     await loadExportsByDocuments()
     if (data?.status === 'FAILED') {
       ElMessage.error(`导出失败：${data?.errorMessage || '未知错误'}`)
       return
     }
-    ElMessage.success(`已创建${format.toUpperCase()}导出任务`)
+    ElMessage.success(`已创建${exportForm.format.toUpperCase()}导出任务（版本：${exportForm.versionNo.trim()}）`)
+    showExportDialog.value = false
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.message || '导出失败')
   } finally {
     exportingDocId.value = null
+  }
+}
+
+const deleteDocument = async (doc: any) => {
+  try {
+    await ElMessageBox.confirm(`确认删除文档「${doc.name}」？该操作不可恢复。`, '删除文档', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+    await api.deleteDocument(doc.id)
+    ElMessage.success('文档已删除')
+    await load()
+  } catch (err: any) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.response?.data?.message || '删除失败')
+    }
+  }
+}
+
+const deleteExport = async (row: any) => {
+  try {
+    await ElMessageBox.confirm('确认删除该导出记录？', '删除导出记录', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+    await api.deleteExport(row.id)
+    ElMessage.success('导出记录已删除')
+    await loadExportsByDocuments()
+  } catch (err: any) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.response?.data?.message || '删除失败')
+    }
   }
 }
 
@@ -210,7 +283,7 @@ const downloadExport = async (row: any) => {
   const blob = new Blob([res.data])
   const link = document.createElement('a')
   link.href = URL.createObjectURL(blob)
-  link.download = `document-${row.documentId || row.id}-${row.id}.${(row.format || 'docx').toLowerCase()}`
+  link.download = `document-${row.documentId || row.id}-${row.id}.${(row.format || 'pdf').toLowerCase()}`
   link.click()
   URL.revokeObjectURL(link.href)
 }

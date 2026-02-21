@@ -4,6 +4,9 @@ export const api = {
   login(data: { username: string; password: string }) {
     return http.post('/auth/login', data)
   },
+  register(data: { username: string; password: string }) {
+    return http.post('/auth/register', data)
+  },
   listProjects() {
     return http.get('/projects')
   },
@@ -24,6 +27,9 @@ export const api = {
   },
   getDocument(id: number) {
     return http.get(`/documents/${id}`)
+  },
+  deleteDocument(id: number) {
+    return http.delete(`/documents/${id}`)
   },
   listSectionTree(documentId: number) {
     return http.get(`/documents/${documentId}/sections/tree`)
@@ -54,15 +60,6 @@ export const api = {
   },
   createVersion(sectionId: number, data: any) {
     return http.post(`/sections/${sectionId}/versions`, data)
-  },
-  createDocumentVersion(documentId: number, data: any) {
-    return http.post(`/documents/${documentId}/versions`, data)
-  },
-  listDocumentVersions(documentId: number) {
-    return http.get(`/documents/${documentId}/versions`)
-  },
-  getDocumentVersion(documentId: number, versionId: number) {
-    return http.get(`/documents/${documentId}/versions/${versionId}`)
   },
   listSectionTemplates() {
     return http.get('/section-templates')
@@ -115,6 +112,9 @@ export const api = {
   downloadExport(exportId: number) {
     return http.get(`/exports/${exportId}/download`, { responseType: 'blob' })
   },
+  deleteExport(exportId: number) {
+    return http.delete(`/exports/${exportId}`)
+  },
   uploadEditorImage(formData: FormData) {
     return http.post('/files/images', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
@@ -148,6 +148,42 @@ export const api = {
   },
   deleteDomainLexicon(lexiconId: number) {
     return http.delete(`/domain-lexicons/${lexiconId}`)
+  },
+  listDictionaryPacks() {
+    return http.get('/domain-lexicons/packs')
+  },
+  createDictionaryPack(data: any) {
+    return http.post('/domain-lexicons/packs', data)
+  },
+  updateDictionaryPack(packId: number, data: any) {
+    return http.put(`/domain-lexicons/packs/${packId}`, data)
+  },
+  deleteDictionaryPack(packId: number) {
+    return http.delete(`/domain-lexicons/packs/${packId}`)
+  },
+  listDictionaryEntries(packId: number) {
+    return http.get(`/domain-lexicons/packs/${packId}/entries`)
+  },
+  upsertDictionaryEntry(packId: number, data: any) {
+    return http.post(`/domain-lexicons/packs/${packId}/entries`, data)
+  },
+  updateDictionaryEntry(entryId: number, data: any) {
+    return http.put(`/domain-lexicons/entries/${entryId}`, data)
+  },
+  deleteDictionaryEntry(entryId: number) {
+    return http.delete(`/domain-lexicons/entries/${entryId}`)
+  },
+  batchUpsertDictionaryEntries(packId: number, data: any) {
+    return http.post(`/domain-lexicons/packs/${packId}/entries/batch-upsert`, data)
+  },
+  listKnowledgeBaseDictionaryPacks(kbId: number) {
+    return http.get(`/domain-lexicons/knowledge-bases/${kbId}/packs`)
+  },
+  bindKnowledgeBaseDictionaryPack(kbId: number, packId: number, data: any = {}) {
+    return http.post(`/domain-lexicons/knowledge-bases/${kbId}/packs/${packId}`, data)
+  },
+  unbindKnowledgeBaseDictionaryPack(kbId: number, packId: number) {
+    return http.delete(`/domain-lexicons/knowledge-bases/${kbId}/packs/${packId}`)
   },
   addKnowledgeContent(kbId: number, data: any) {
     return http.post(`/knowledge-bases/${kbId}/contents`, data)
@@ -208,5 +244,56 @@ export const api = {
   },
   getPublicSubmission(shareToken: string, submissionId: number) {
     return http.get(`/public/exams/${shareToken}/submissions/${submissionId}`)
+  },
+  listDepartments() {
+    return http.get('/base/departments')
+  },
+  createDepartment(data: any) {
+    return http.post('/base/departments', data)
+  },
+  updateDepartment(id: number, data: any) {
+    return http.put(`/base/departments/${id}`, data)
+  },
+  deleteDepartment(id: number) {
+    return http.delete(`/base/departments/${id}`)
+  },
+  listMenus(params?: any) {
+    return http.get('/base/menus', { params })
+  },
+  createMenu(data: any) {
+    return http.post('/base/menus', data)
+  },
+  updateMenu(id: number, data: any) {
+    return http.put(`/base/menus/${id}`, data)
+  },
+  deleteMenu(id: number) {
+    return http.delete(`/base/menus/${id}`)
+  },
+  listRoles() {
+    return http.get('/base/roles')
+  },
+  createRole(data: any) {
+    return http.post('/base/roles', data)
+  },
+  updateRole(id: number, data: any) {
+    return http.put(`/base/roles/${id}`, data)
+  },
+  deleteRole(id: number) {
+    return http.delete(`/base/roles/${id}`)
+  },
+  listUsersByBase() {
+    return http.get('/base/users')
+  },
+  createBaseUser(data: any) {
+    return http.post('/base/users', data)
+  },
+  updateBaseUser(id: number, data: any) {
+    return http.put(`/base/users/${id}`, data)
+  },
+  deleteBaseUser(id: number) {
+    return http.delete(`/base/users/${id}`)
+  },
+  getCurrentUserMenus() {
+    return http.get('/base/current-user-menus')
   }
 }

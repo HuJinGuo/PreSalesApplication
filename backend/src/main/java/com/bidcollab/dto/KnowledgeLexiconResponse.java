@@ -11,7 +11,7 @@ public class KnowledgeLexiconResponse {
   private Long knowledgeBaseId;
   private String category;
   private String term;
+  private String standardTerm;
   private Boolean enabled;
   private Instant createdAt;
 }
-

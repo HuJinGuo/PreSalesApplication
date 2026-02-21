@@ -27,6 +27,9 @@ public class DocumentExport extends BaseEntity {
   @Column(nullable = false, length = 16)
   private String format;
 
+  @Column(name = "version_no", nullable = false, length = 64)
+  private String versionNo;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 16, columnDefinition = "VARCHAR(16)")
   private ExportStatus status;

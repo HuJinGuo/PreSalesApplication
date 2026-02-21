@@ -12,6 +12,10 @@ import DomainLexiconView from '@/views/DomainLexiconView.vue'
 import KnowledgeGraphView from '@/views/KnowledgeGraphView.vue'
 import ExamCenterView from '@/views/ExamCenterView.vue'
 import PublicExamLinkView from '@/views/PublicExamLinkView.vue'
+import DeptManagementView from '@/views/DeptManagementView.vue'
+import UserManagementView from '@/views/UserManagementView.vue'
+import MenuManagementView from '@/views/MenuManagementView.vue'
+import RoleManagementView from '@/views/RoleManagementView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
@@ -33,6 +37,10 @@ const router = createRouter({
         { path: '/knowledge-graph', component: KnowledgeGraphView },
         { path: '/exams', component: ExamCenterView },
         { path: '/reviews', component: ReviewCenterView },
+        { path: '/base/depts', component: DeptManagementView },
+        { path: '/base/users', component: UserManagementView },
+        { path: '/base/roles', component: RoleManagementView },
+        { path: '/base/menus', component: MenuManagementView },
         { path: '/exports/:docId', component: ExportHistoryView }
       ]
     }

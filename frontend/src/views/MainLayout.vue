@@ -11,48 +11,53 @@
         </div>
       </div>
 
-      <div class="quick-create">
+      <!-- <div class="quick-create">
         <el-button type="primary" round size="large" @click="router.push('/projects')">
           <el-icon><Plus /></el-icon>
           新建项目
         </el-button>
-      </div>
+      </div> -->
 
       <el-menu class="drive-menu" :default-active="activePath" router>
-        <el-menu-item index="/projects">
-          <el-icon><Folder /></el-icon>
-          <span>项目管理</span>
-        </el-menu-item>
-        <el-menu-item index="/knowledge">
-          <el-icon><Collection /></el-icon>
-          <span>知识库</span>
-        </el-menu-item>
-        <el-menu-item index="/domain-lexicons">
-          <el-icon><Tickets /></el-icon>
-          <span>领域词典</span>
-        </el-menu-item>
-        <el-menu-item index="/knowledge-graph">
-          <el-icon><Share /></el-icon>
-          <span>知识图谱</span>
-        </el-menu-item>
-        <el-menu-item index="/assets">
-          <el-icon><Document /></el-icon>
-          <span>章节资产库</span>
-        </el-menu-item>
-        <el-menu-item index="/exams">
-          <el-icon><Reading /></el-icon>
-          <span>考试中心</span>
-        </el-menu-item>
-        <el-menu-item index="/reviews">
-          <el-icon><Checked /></el-icon>
-          <span>审核中心</span>
-        </el-menu-item>
+        <template v-for="item in navMenus" :key="item.id">
+          <el-sub-menu v-if="item.children?.length" :index="`group-${item.id}`">
+            <template #title>
+              <el-icon><component :is="resolveIcon(item.icon)" /></el-icon>
+              <span>{{ item.title }}</span>
+            </template>
+            <template v-for="child in item.children" :key="child.id">
+              <el-sub-menu v-if="child.children?.length" :index="`group-${child.id}`">
+                <template #title>
+                  <el-icon><component :is="resolveIcon(child.icon)" /></el-icon>
+                  <span>{{ child.title }}</span>
+                </template>
+                <el-menu-item
+                  v-for="grand in child.children"
+                  :key="grand.id"
+                  :index="grand.path || `group-${grand.id}`"
+                  :disabled="!grand.path"
+                >
+                  <el-icon><component :is="resolveIcon(grand.icon)" /></el-icon>
+                  <span>{{ grand.title }}</span>
+                </el-menu-item>
+              </el-sub-menu>
+              <el-menu-item v-else :index="child.path || `group-${child.id}`" :disabled="!child.path">
+                <el-icon><component :is="resolveIcon(child.icon)" /></el-icon>
+                <span>{{ child.title }}</span>
+              </el-menu-item>
+            </template>
+          </el-sub-menu>
+          <el-menu-item v-else :index="item.path || `group-${item.id}`" :disabled="!item.path">
+            <el-icon><component :is="resolveIcon(item.icon)" /></el-icon>
+            <span>{{ item.title }}</span>
+          </el-menu-item>
+        </template>
       </el-menu>
     </el-aside>
     <el-container class="drive-main-wrap">
       <el-header class="drive-topbar">
         <div class="topbar-left">
-          <div class="workspace-title">售前招标文档协作平台</div>
+          <div class="workspace-title">AI文档协作平台</div>
           <div class="top-search" @click="openAssistant">
             <el-icon><Search /></el-icon>
             <input
@@ -144,12 +149,29 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { Checked, Collection, Document, Files, Folder, Plus, Reading, Search, Share, Tickets, User } from '@element-plus/icons-vue'
+import {
+  Checked,
+  Collection,
+  Document,
+  Files,
+  Folder,
+  Menu,
+  OfficeBuilding,
+  Plus,
+  Reading,
+  Search,
+  Setting,
+  Share,
+  Tickets,
+  User,
+  UserFilled,
+  Avatar
+} from '@element-plus/icons-vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -175,10 +197,66 @@ const renderMarkdown = (input: string) => {
 }
 
 const activePath = computed(() => route.path)
+const navMenus = ref<any[]>([])
+const fallbackMenus = [
+  { id: 1, title: '项目管理', path: '/projects', icon: 'Folder', children: [] },
+  {
+    id: 2,
+    title: '知识中心',
+    path: null,
+    icon: 'Collection',
+    children: [
+      { id: 3, title: '知识库', path: '/knowledge', icon: 'Document', children: [] },
+      { id: 4, title: '领域词典中心', path: '/domain-lexicons', icon: 'Tickets', children: [] },
+      { id: 5, title: '知识图谱', path: '/knowledge-graph', icon: 'Share', children: [] }
+    ]
+  },
+  { id: 6, title: '审核中心', path: '/reviews', icon: 'Checked', children: [] },
+  {
+    id: 7,
+    title: '基础信息管理',
+    path: null,
+    icon: 'Setting',
+    children: [
+      { id: 8, title: '部门管理', path: '/base/depts', icon: 'OfficeBuilding', children: [] },
+      { id: 9, title: '用户管理', path: '/base/users', icon: 'UserFilled', children: [] },
+      { id: 10, title: '角色管理', path: '/base/roles', icon: 'Avatar', children: [] },
+      { id: 11, title: '菜单管理', path: '/base/menus', icon: 'Menu', children: [] }
+    ]
+  }
+]
+const iconMap: Record<string, any> = {
+  Folder,
+  Collection,
+  Document,
+  Tickets,
+  Share,
+  Checked,
+  Setting,
+  OfficeBuilding,
+  UserFilled,
+  Menu,
+  Reading,
+  Avatar
+}
 
 const logout = () => {
   auth.clear()
   router.push('/login')
+}
+
+const resolveIcon = (iconName?: string) => {
+  if (!iconName) return Document
+  return iconMap[iconName] || Document
+}
+
+const loadNavigationMenus = async () => {
+  try {
+    const { data } = await api.getCurrentUserMenus()
+    navMenus.value = data?.menus?.length ? data.menus : fallbackMenus
+  } catch (_error) {
+    navMenus.value = fallbackMenus
+  }
 }
 
 const loadKnowledgeBases = async () => {
@@ -214,6 +292,10 @@ const submitAssistantQuery = async () => {
     assistantLoading.value = false
   }
 }
+
+onMounted(() => {
+  loadNavigationMenus()
+})
 </script>
 
 <style scoped>
@@ -223,9 +305,10 @@ const submitAssistantQuery = async () => {
 }
 
 .drive-sidebar {
-  background: #f8fafd;
+  background: linear-gradient(180deg, #f8fbff 0%, #f5f8fe 100%);
   border-right: 1px solid #e7ebf3;
   padding: 16px 10px;
+  box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.03);
 }
 
 .drive-logo {
@@ -263,6 +346,11 @@ const submitAssistantQuery = async () => {
 .drive-menu {
   border-right: none;
   background: transparent;
+  --el-menu-bg-color: transparent;
+  --el-menu-hover-bg-color: #eef4ff;
+  --el-menu-active-color: #1a73e8;
+  --el-menu-text-color: #334155;
+  --el-menu-item-height: 42px;
 }
 
 .drive-main-wrap {
@@ -513,7 +601,22 @@ const submitAssistantQuery = async () => {
   color: #32435d;
 }
 
+:deep(.el-sub-menu__title) {
+  border-radius: 10px;
+  margin: 2px 8px;
+  color: #32435d;
+}
+
+:deep(.el-sub-menu .el-menu-item) {
+  margin-left: 18px;
+}
+
 :deep(.el-menu-item.is-active) {
+  background: #e8f0fe;
+  color: #1a73e8;
+}
+
+:deep(.el-sub-menu.is-active > .el-sub-menu__title) {
   background: #e8f0fe;
   color: #1a73e8;
 }

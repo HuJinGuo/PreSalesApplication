@@ -6,4 +6,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface DocumentExportRepository extends JpaRepository<DocumentExport, Long> {
   List<DocumentExport> findByDocumentIdOrderByCreatedAtDesc(Long documentId);
+  void deleteByDocumentId(Long documentId);
 }

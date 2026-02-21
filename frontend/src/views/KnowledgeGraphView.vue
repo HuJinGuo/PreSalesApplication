@@ -82,15 +82,21 @@
       </div>
     </div>
 
-    <el-drawer v-model="showNodeDetail" size="42%" :title="nodeDetail?.name || '节点详情'" class="node-drawer">
+    <el-drawer v-model="showNodeDetail" size="46%" :with-header="false" class="node-drawer">
       <div v-if="nodeDetail" class="node-detail">
-        <div class="node-meta">
-          <el-tag size="small">{{ nodeDetail.nodeType }}</el-tag>
-          <span>文档数：{{ (nodeDetail.relatedDocuments || []).length }}</span>
-          <span>片段数：{{ (nodeDetail.relatedChunks || []).length }}</span>
+        <div class="node-hero">
+          <div class="node-hero-top">
+            <div class="node-hero-title">{{ nodeDetail.name || '节点详情' }}</div>
+            <el-button text @click="showNodeDetail = false">关闭</el-button>
+          </div>
+          <div class="node-meta">
+            <el-tag size="small" type="primary">{{ nodeDetail.nodeType }}</el-tag>
+            <span>文档数：{{ (nodeDetail.relatedDocuments || []).length }}</span>
+            <span>片段数：{{ (nodeDetail.relatedChunks || []).length }}</span>
+          </div>
         </div>
-        <div class="node-summary">{{ nodeDetail.summary }}</div>
-        <div class="node-section">
+        <div class="node-summary card-soft">{{ nodeDetail.summary }}</div>
+        <div class="node-section card-soft">
           <div class="node-section-title">关联文档</div>
           <el-table :data="nodeDetail.relatedDocuments || []" size="small" max-height="220">
             <el-table-column prop="documentId" label="文档ID" width="90" />
@@ -98,13 +104,13 @@
             <el-table-column prop="hitCount" label="命中次数" width="100" />
           </el-table>
         </div>
-        <div class="node-section" v-if="nodeDetail.relatedKeywords?.length">
+        <div class="node-section card-soft" v-if="nodeDetail.relatedKeywords?.length">
           <div class="node-section-title">关联关键词</div>
           <div class="keywords">
-            <el-tag v-for="kw in nodeDetail.relatedKeywords" :key="kw" size="small">{{ kw }}</el-tag>
+            <el-tag v-for="kw in nodeDetail.relatedKeywords" :key="kw" size="small" effect="plain">{{ kw }}</el-tag>
           </div>
         </div>
-        <div class="node-section">
+        <div class="node-section card-soft related-chunks-section">
           <div class="node-section-title">相关片段</div>
           <el-table :data="nodeDetail.relatedChunks || []" size="small" max-height="260">
             <el-table-column prop="documentTitle" label="文档" width="220" />
@@ -397,24 +403,55 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.node-hero {
+  border: 1px solid #dce6f6;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f7fbff, #f1f6ff);
+  padding: 12px;
+}
+
+.node-hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.node-hero-title {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1f2a3d;
+  line-height: 1.2;
+}
+
 .node-meta {
   display: flex;
   align-items: center;
   gap: 10px;
   color: #64748b;
   font-size: 12px;
+  flex-wrap: wrap;
 }
 
 .node-summary {
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f8fafc;
-  padding: 10px;
+  color: #334155;
+  line-height: 1.65;
 }
 
 .node-section-title {
   font-weight: 600;
   margin-bottom: 8px;
+}
+
+.card-soft {
+  border: 1px solid #e4ebf5;
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+}
+
+.related-chunks-section {
+  margin-top: 10px;
 }
 
 .keywords {
@@ -502,6 +539,12 @@ onUnmounted(() => {
 
 :deep(.node-drawer .el-drawer__body) {
   overflow-y: auto;
-  padding-bottom: 16px;
+  padding: 14px 14px 16px;
+  background: linear-gradient(180deg, #f8fbff, #f3f6fb);
+}
+
+:deep(.node-drawer .el-table) {
+  border-radius: 10px;
+  overflow: hidden;
 }
 </style>

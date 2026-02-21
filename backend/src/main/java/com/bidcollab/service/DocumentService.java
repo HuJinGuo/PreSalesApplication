@@ -3,21 +3,20 @@ package com.bidcollab.service;
 import com.bidcollab.dto.DocumentCreateRequest;
 import com.bidcollab.dto.DocumentResponse;
 import com.bidcollab.dto.DocumentUpdateRequest;
-import com.bidcollab.dto.DocumentVersionCreateRequest;
-import com.bidcollab.dto.DocumentVersionResponse;
 import com.bidcollab.entity.Document;
-import com.bidcollab.entity.DocumentVersion;
 import com.bidcollab.entity.Project;
 import com.bidcollab.entity.Section;
+import com.bidcollab.entity.SectionVersion;
+import com.bidcollab.repository.DocumentExportRepository;
 import com.bidcollab.repository.DocumentRepository;
-import com.bidcollab.repository.DocumentVersionRepository;
 import com.bidcollab.repository.ProjectRepository;
+import com.bidcollab.repository.SectionAssetRepository;
 import com.bidcollab.repository.SectionRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.bidcollab.repository.SectionReuseTraceRepository;
+import com.bidcollab.repository.SectionReviewRepository;
+import com.bidcollab.repository.SectionVersionRepository;
 import jakarta.persistence.EntityNotFoundException;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,21 +26,30 @@ public class DocumentService {
   private final DocumentRepository documentRepository;
   private final ProjectRepository projectRepository;
   private final SectionRepository sectionRepository;
-  private final DocumentVersionRepository documentVersionRepository;
-  private final ObjectMapper objectMapper;
+  private final SectionVersionRepository sectionVersionRepository;
+  private final SectionAssetRepository sectionAssetRepository;
+  private final SectionReviewRepository sectionReviewRepository;
+  private final SectionReuseTraceRepository sectionReuseTraceRepository;
+  private final DocumentExportRepository documentExportRepository;
   private final CurrentUserService currentUserService;
 
   public DocumentService(DocumentRepository documentRepository,
                          ProjectRepository projectRepository,
                          SectionRepository sectionRepository,
-                         DocumentVersionRepository documentVersionRepository,
-                         ObjectMapper objectMapper,
+                         SectionVersionRepository sectionVersionRepository,
+                         SectionAssetRepository sectionAssetRepository,
+                         SectionReviewRepository sectionReviewRepository,
+                         SectionReuseTraceRepository sectionReuseTraceRepository,
+                         DocumentExportRepository documentExportRepository,
                          CurrentUserService currentUserService) {
     this.documentRepository = documentRepository;
     this.projectRepository = projectRepository;
     this.sectionRepository = sectionRepository;
-    this.documentVersionRepository = documentVersionRepository;
-    this.objectMapper = objectMapper;
+    this.sectionVersionRepository = sectionVersionRepository;
+    this.sectionAssetRepository = sectionAssetRepository;
+    this.sectionReviewRepository = sectionReviewRepository;
+    this.sectionReuseTraceRepository = sectionReuseTraceRepository;
+    this.documentExportRepository = documentExportRepository;
     this.currentUserService = currentUserService;
   }
 
@@ -78,66 +86,33 @@ public class DocumentService {
   }
 
   @Transactional
-  public DocumentVersionResponse createVersion(Long documentId, DocumentVersionCreateRequest request) {
-    Document document = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
-    String snapshotJson = buildSnapshot(documentId);
-    DocumentVersion version = DocumentVersion.builder()
-        .documentId(documentId)
-        .summary(request == null ? null : request.getSummary())
-        .snapshotJson(snapshotJson)
-        .createdBy(currentUserService.getCurrentUserId())
-        .build();
-    documentVersionRepository.save(version);
-    document.setVersionNo((document.getVersionNo() == null ? 0 : document.getVersionNo()) + 1);
-    return toVersionResponse(version, true);
-  }
+  public void delete(Long id) {
+    Document document = documentRepository.findById(id).orElseThrow(EntityNotFoundException::new);
+    List<Section> sections = sectionRepository.findTreeByDocumentId(id);
+    if (!sections.isEmpty()) {
+      List<Long> sectionIds = sections.stream().map(Section::getId).toList();
+      List<SectionVersion> sectionVersions = sectionVersionRepository.findBySectionIdIn(sectionIds);
+      List<Long> versionIds = sectionVersions.stream().map(SectionVersion::getId).toList();
 
-  public List<DocumentVersionResponse> listVersions(Long documentId) {
-    documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
-    return documentVersionRepository.findByDocumentIdOrderByCreatedAtDesc(documentId).stream()
-        .map(v -> toVersionResponse(v, false))
-        .collect(Collectors.toList());
-  }
+      sectionRepository.clearCurrentVersionByDocumentId(id);
+      sectionReuseTraceRepository.deleteBySectionIds(sectionIds);
+      if (!versionIds.isEmpty()) {
+        sectionReuseTraceRepository.deleteByVersionIds(versionIds);
+        sectionAssetRepository.deleteByVersionIdIn(versionIds);
+        sectionReviewRepository.deleteByVersionIdIn(versionIds);
+      }
+      sectionAssetRepository.deleteBySectionIdIn(sectionIds);
+      sectionReviewRepository.deleteBySectionIdIn(sectionIds);
+      sectionVersionRepository.deleteBySectionIdIn(sectionIds);
 
-  public DocumentVersionResponse getVersion(Long documentId, Long versionId) {
-    documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
-    DocumentVersion version = documentVersionRepository.findById(versionId).orElseThrow(EntityNotFoundException::new);
-    if (!version.getDocumentId().equals(documentId)) {
-      throw new IllegalArgumentException("Version does not belong to document");
+      sections.sort((a, b) -> Integer.compare(b.getLevel(), a.getLevel()));
+      for (Section section : sections) {
+        sectionRepository.delete(section);
+      }
     }
-    return toVersionResponse(version, true);
-  }
 
-  private String buildSnapshot(Long documentId) {
-    List<Section> sections = sectionRepository.findForExportByDocumentId(documentId);
-    List<Map<String, Object>> sectionSnapshots = new ArrayList<>();
-    for (Section section : sections) {
-      Map<String, Object> item = new java.util.LinkedHashMap<>();
-      item.put("sectionId", section.getId());
-      item.put("parentId", section.getParent() == null ? null : section.getParent().getId());
-      item.put("title", section.getTitle());
-      item.put("level", section.getLevel());
-      item.put("sortIndex", section.getSortIndex());
-      item.put("status", section.getStatus() == null ? null : section.getStatus().name());
-      item.put("content", section.getCurrentVersion() == null ? "" : section.getCurrentVersion().getContent());
-      sectionSnapshots.add(item);
-    }
-    try {
-      return objectMapper.writeValueAsString(Map.of("sections", sectionSnapshots));
-    } catch (Exception ex) {
-      throw new IllegalStateException("无法生成文档版本快照", ex);
-    }
-  }
-
-  private DocumentVersionResponse toVersionResponse(DocumentVersion version, boolean includeSnapshot) {
-    return DocumentVersionResponse.builder()
-        .id(version.getId())
-        .documentId(version.getDocumentId())
-        .summary(version.getSummary())
-        .snapshotJson(includeSnapshot ? version.getSnapshotJson() : null)
-        .createdBy(version.getCreatedBy())
-        .createdAt(version.getCreatedAt())
-        .build();
+    documentExportRepository.deleteByDocumentId(id);
+    documentRepository.delete(document);
   }
 
   private DocumentResponse toResponse(Document document) {

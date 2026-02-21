@@ -27,6 +27,7 @@
         </el-upload>
         <el-button type="primary" :disabled="!selectedFile" @click="uploadFile">上传并向量化</el-button>
         <el-button @click="showManual = true">手动添加内容</el-button>
+        <el-button @click="openPackBinding">引入外部词典包</el-button>
         <el-button @click="reindexKb">重建索引</el-button>
       </div>
       <div class="upload-tip">上传文件会落盘，支持后续词典更新后重新抽取并重建向量。</div>
@@ -36,6 +37,16 @@
         <el-table-column prop="title" label="标题" />
         <el-table-column prop="sourceType" label="来源" width="120" />
         <el-table-column prop="fileType" label="文件类型" width="120" />
+        <el-table-column label="索引状态" width="220">
+          <template #default="scope">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <el-tag :type="indexStatusTagType(scope.row.indexStatus)" effect="light">
+                {{ scope.row.indexStatus || 'SUCCESS' }}
+              </el-tag>
+              <span class="index-message" :title="scope.row.indexMessage || ''">{{ scope.row.indexMessage }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="storagePath" label="存储路径" />
         <el-table-column prop="visibility" label="可见性" width="140">
           <template #default="scope">
@@ -69,11 +80,36 @@
         <el-button type="primary" @click="addManual">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showPackBinding" title="引入外部词典包" width="680px">
+      <el-table :data="packBindings" border v-loading="packBindingLoading">
+        <el-table-column prop="packName" label="词典包" min-width="200" />
+        <el-table-column prop="packCode" label="编码" width="130" />
+        <el-table-column prop="priority" label="优先级" width="90" />
+        <el-table-column prop="enabled" label="状态" width="90">
+          <template #default="scope">{{ scope.row.enabled ? '启用' : '停用' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="180">
+          <template #default="scope">
+            <el-button link type="primary" @click="toggleBinding(scope.row)">{{ scope.row.enabled ? '停用' : '启用' }}</el-button>
+            <el-button link type="danger" @click="removeBinding(scope.row)">移除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div style="margin-top: 14px; display: flex; gap: 10px; align-items: center">
+        <el-select v-model="packToAdd" placeholder="选择词典包" style="width: 300px">
+          <el-option v-for="pack in allPacks" :key="pack.id" :label="pack.name" :value="pack.id" />
+        </el-select>
+        <el-input-number v-model="packPriority" :min="1" :max="999" />
+        <el-button type="primary" @click="bindSelectedPack">引入</el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { UploadFile } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
@@ -84,6 +120,13 @@ const documents = ref<any[]>([])
 const selectedFile = ref<File | null>(null)
 const showCreateKb = ref(false)
 const showManual = ref(false)
+const showPackBinding = ref(false)
+const packBindings = ref<any[]>([])
+const allPacks = ref<any[]>([])
+const packToAdd = ref<number>()
+const packPriority = ref(100)
+const packBindingLoading = ref(false)
+const pollingTimer = ref<number | null>(null)
 
 const kbForm = reactive({ name: '', description: '' })
 const manualForm = reactive({ title: '', content: '' })
@@ -97,6 +140,7 @@ const loadDocuments = async () => {
   if (!selectedKb.value) return
   const { data } = await api.listKnowledgeDocuments(selectedKb.value.id)
   documents.value = data
+  syncIndexPolling()
 }
 
 const createKb = async () => {
@@ -121,7 +165,7 @@ const uploadFile = async () => {
   form.append('file', selectedFile.value)
   await api.uploadKnowledgeFile(selectedKb.value.id, form)
   selectedFile.value = null
-  ElMessage.success('上传并向量化完成')
+  ElMessage.success('上传成功，已进入后台向量化队列')
   await loadDocuments()
 }
 
@@ -129,7 +173,7 @@ const addManual = async () => {
   if (!selectedKb.value) return
   await api.addKnowledgeContent(selectedKb.value.id, manualForm)
   showManual.value = false
-  ElMessage.success('知识内容已添加')
+  ElMessage.success('知识内容已添加，已进入后台向量化队列')
   await loadDocuments()
 }
 
@@ -143,7 +187,8 @@ const changeVisibility = async (row: any, visibility: string) => {
 const reindexKb = async () => {
   if (!selectedKb.value) return
   await api.reindexKnowledgeBase(selectedKb.value.id)
-  ElMessage.success('知识库索引已重建')
+  ElMessage.success('已提交重建任务，后台处理中')
+  await loadDocuments()
 }
 
 const removeKb = async (row: any) => {
@@ -157,7 +202,104 @@ const removeKb = async (row: any) => {
   await loadKnowledgeBases()
 }
 
+const loadPackBindings = async () => {
+  if (!selectedKb.value) return
+  packBindingLoading.value = true
+  try {
+    const [bindingRes, packRes] = await Promise.all([
+      api.listKnowledgeBaseDictionaryPacks(selectedKb.value.id),
+      api.listDictionaryPacks()
+    ])
+    packBindings.value = bindingRes.data || []
+    allPacks.value = packRes.data || []
+  } finally {
+    packBindingLoading.value = false
+  }
+}
+
+const openPackBinding = async () => {
+  if (!selectedKb.value) {
+    ElMessage.warning('请先选择知识库')
+    return
+  }
+  showPackBinding.value = true
+  await loadPackBindings()
+}
+
+const bindSelectedPack = async () => {
+  if (!selectedKb.value || !packToAdd.value) {
+    ElMessage.warning('请选择词典包')
+    return
+  }
+  await api.bindKnowledgeBaseDictionaryPack(selectedKb.value.id, packToAdd.value, {
+    priority: packPriority.value,
+    enabled: true
+  })
+  ElMessage.success('词典包已引入')
+  await loadPackBindings()
+}
+
+const toggleBinding = async (row: any) => {
+  if (!selectedKb.value) return
+  await api.bindKnowledgeBaseDictionaryPack(selectedKb.value.id, row.packId, {
+    priority: row.priority,
+    enabled: !row.enabled
+  })
+  ElMessage.success('状态已更新')
+  await loadPackBindings()
+}
+
+const removeBinding = async (row: any) => {
+  if (!selectedKb.value) return
+  await api.unbindKnowledgeBaseDictionaryPack(selectedKb.value.id, row.packId)
+  ElMessage.success('已移除')
+  await loadPackBindings()
+}
+
+const hasRunningIndexTask = () =>
+  documents.value.some((d: any) => d.indexStatus === 'PENDING' || d.indexStatus === 'RUNNING')
+
+const stopIndexPolling = () => {
+  if (pollingTimer.value !== null) {
+    window.clearInterval(pollingTimer.value)
+    pollingTimer.value = null
+  }
+}
+
+const startIndexPolling = () => {
+  if (pollingTimer.value !== null) {
+    return
+  }
+  pollingTimer.value = window.setInterval(async () => {
+    if (!selectedKb.value) {
+      stopIndexPolling()
+      return
+    }
+    const { data } = await api.listKnowledgeDocuments(selectedKb.value.id)
+    documents.value = data
+    if (!hasRunningIndexTask()) {
+      stopIndexPolling()
+    }
+  }, 3000)
+}
+
+const syncIndexPolling = () => {
+  if (hasRunningIndexTask()) {
+    startIndexPolling()
+  } else {
+    stopIndexPolling()
+  }
+}
+
+const indexStatusTagType = (status?: string) => {
+  if (status === 'FAILED') return 'danger'
+  if (status === 'RUNNING') return 'warning'
+  if (status === 'PENDING') return 'info'
+  return 'success'
+}
+
 onMounted(loadKnowledgeBases)
+onBeforeUnmount(() => stopIndexPolling())
 </script>
 
 <style scoped>
@@ -179,5 +321,13 @@ onMounted(loadKnowledgeBases)
   color: #64748b;
   font-size: 12px;
 }
-</style>
 
+.index-message {
+  color: #64748b;
+  font-size: 12px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>

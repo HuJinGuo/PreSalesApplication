@@ -6,5 +6,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface ExamPaperRepository extends JpaRepository<ExamPaper, Long> {
   List<ExamPaper> findByKnowledgeBaseIdOrderByCreatedAtDesc(Long knowledgeBaseId);
+  void deleteByKnowledgeBaseId(Long knowledgeBaseId);
   java.util.Optional<ExamPaper> findByShareToken(String shareToken);
 }

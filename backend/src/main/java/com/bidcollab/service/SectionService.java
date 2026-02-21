@@ -32,17 +32,18 @@ public class SectionService {
   private final CurrentUserService currentUserService;
 
   public SectionService(SectionRepository sectionRepository,
-                        SectionVersionRepository sectionVersionRepository,
-                        DocumentRepository documentRepository,
-                        CurrentUserService currentUserService) {
+      SectionVersionRepository sectionVersionRepository,
+      DocumentRepository documentRepository,
+      CurrentUserService currentUserService) {
     this.sectionRepository = sectionRepository;
     this.sectionVersionRepository = sectionVersionRepository;
     this.documentRepository = documentRepository;
     this.currentUserService = currentUserService;
   }
 
+  @Transactional(readOnly = true)
   public List<SectionTreeNode> getTree(Long documentId) {
-    List<Section> sections = sectionRepository.findByDocumentIdOrderBySortIndexAsc(documentId);
+    List<Section> sections = sectionRepository.findTreeByDocumentId(documentId);
     Map<Long, SectionTreeNode> map = new HashMap<>();
     List<SectionTreeNode> roots = new ArrayList<>();
     for (Section section : sections) {
@@ -92,9 +93,12 @@ public class SectionService {
   @Transactional
   public SectionTreeNode update(Long sectionId, SectionUpdateRequest request) {
     Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
-    if (request.getTitle() != null) section.setTitle(request.getTitle());
-    if (request.getSortIndex() != null) section.setSortIndex(request.getSortIndex());
-    if (request.getStatus() != null) section.setStatus(SectionStatus.valueOf(request.getStatus()));
+    if (request.getTitle() != null)
+      section.setTitle(request.getTitle());
+    if (request.getSortIndex() != null)
+      section.setSortIndex(request.getSortIndex());
+    if (request.getStatus() != null)
+      section.setStatus(SectionStatus.valueOf(request.getStatus()));
     return toNode(section);
   }
 
@@ -148,7 +152,8 @@ public class SectionService {
   }
 
   @Transactional
-  public SectionVersionResponse createVersion(Long sectionId, SectionVersionCreateRequest request, SectionSourceType sourceType, String sourceRef) {
+  public SectionVersionResponse createVersion(Long sectionId, SectionVersionCreateRequest request,
+      SectionSourceType sourceType, String sourceRef) {
     Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
     Long userId = currentUserService.getCurrentUserId();
     if (section.getLockedBy() != null && !section.getLockedBy().equals(userId)) {
@@ -174,9 +179,11 @@ public class SectionService {
     }
     sectionVersionRepository.save(version);
     section.setCurrentVersion(version);
+    sectionRepository.save(section);
     return toVersionResponse(version);
   }
 
+  @Transactional(readOnly = true)
   public List<SectionVersionResponse> listVersions(Long sectionId) {
     Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
     if (section.getCurrentVersion() == null) {
@@ -185,6 +192,7 @@ public class SectionService {
     return List.of(toVersionResponse(section.getCurrentVersion()));
   }
 
+  @Transactional(readOnly = true)
   public SectionVersionResponse getVersion(Long sectionId, Long versionId) {
     Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
     SectionVersion version = section.getCurrentVersion();

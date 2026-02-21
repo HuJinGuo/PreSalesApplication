@@ -9,6 +9,7 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import java.time.Instant;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -51,4 +52,16 @@ public class KnowledgeDocument extends BaseEntity {
 
   @Column(name = "created_by")
   private Long createdBy;
+
+  @Column(name = "index_status", nullable = false, length = 16)
+  private String indexStatus;
+
+  @Column(name = "index_message", length = 1000)
+  private String indexMessage;
+
+  @Column(name = "indexed_at")
+  private Instant indexedAt;
+
+  @Column(name = "index_task_id", length = 64)
+  private String indexTaskId;
 }

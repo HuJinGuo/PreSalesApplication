@@ -17,8 +17,8 @@ import com.bidcollab.dto.graph.KnowledgeGraphNode;
 import com.bidcollab.dto.graph.KnowledgeGraphNodeDetailResponse;
 import com.bidcollab.dto.graph.KnowledgeGraphResponse;
 import com.bidcollab.entity.KnowledgeBase;
-import com.bidcollab.entity.KnowledgeBaseDomainLexicon;
 import com.bidcollab.entity.KnowledgeChunk;
+import com.bidcollab.entity.KnowledgeChunkTerm;
 import com.bidcollab.entity.KnowledgeDocument;
 import com.bidcollab.entity.KnowledgeDocumentPermission;
 import com.bidcollab.entity.ExamPaper;
@@ -28,7 +28,10 @@ import com.bidcollab.repository.ExamQuestionRepository;
 import com.bidcollab.repository.ExamSubmissionRepository;
 import com.bidcollab.repository.KnowledgeBaseRepository;
 import com.bidcollab.repository.KnowledgeBaseDomainLexiconRepository;
+import com.bidcollab.repository.KnowledgeBaseDictionaryPackRepository;
 import com.bidcollab.repository.KnowledgeChunkRepository;
+import com.bidcollab.repository.KnowledgeChunkTermRepository;
+import com.bidcollab.repository.KnowledgeChunkTermRepository.TermStatRow;
 import com.bidcollab.repository.KnowledgeDocumentPermissionRepository;
 import com.bidcollab.repository.KnowledgeDocumentRepository;
 import com.bidcollab.repository.UserRepository;
@@ -43,6 +46,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -77,6 +81,10 @@ import org.springframework.beans.factory.annotation.Value;
  */
 @Service
 public class KnowledgeBaseService {
+  private static final String INDEX_PENDING = "PENDING";
+  private static final String INDEX_RUNNING = "RUNNING";
+  private static final String INDEX_SUCCESS = "SUCCESS";
+  private static final String INDEX_FAILED = "FAILED";
   /** JSON 序列化工具 */
   private static final ObjectMapper MAPPER = new ObjectMapper();
   /** 分词正则：按非汉字/字母/数字字符切分 */
@@ -88,14 +96,17 @@ public class KnowledgeBaseService {
       "每年", "每月", "每周", "每季度", "每半月", "每半年", "所示", "如下", "相关", "注意事项", "说明");
   private final KnowledgeBaseRepository baseRepository;
   private final KnowledgeBaseDomainLexiconRepository lexiconRepository;
+  private final KnowledgeBaseDictionaryPackRepository kbDictionaryPackRepository;
   private final KnowledgeDocumentRepository documentRepository;
   private final KnowledgeChunkRepository chunkRepository;
+  private final KnowledgeChunkTermRepository chunkTermRepository;
   private final KnowledgeDocumentPermissionRepository permissionRepository;
   private final ExamPaperRepository examPaperRepository;
   private final ExamQuestionRepository examQuestionRepository;
   private final ExamSubmissionRepository examSubmissionRepository;
   private final UserRepository userRepository;
   private final CurrentUserService currentUserService;
+  private final DomainLexiconService domainLexiconService;
   private final DocumentTextExtractor textExtractor;
   private final TextChunker textChunker;
   private final AiClient aiClient;
@@ -103,39 +114,49 @@ public class KnowledgeBaseService {
   private final String uploadStorageDir;
   /** Embedding 并行线程池，控制并发数避免压垮 AI API */
   private final ExecutorService embeddingExecutor;
+  /** 文档重建索引线程池（文档级异步任务） */
+  private final ExecutorService knowledgeReindexExecutor;
 
   public KnowledgeBaseService(KnowledgeBaseRepository baseRepository,
       KnowledgeBaseDomainLexiconRepository lexiconRepository,
+      KnowledgeBaseDictionaryPackRepository kbDictionaryPackRepository,
       KnowledgeDocumentRepository documentRepository,
       KnowledgeChunkRepository chunkRepository,
+      KnowledgeChunkTermRepository chunkTermRepository,
       KnowledgeDocumentPermissionRepository permissionRepository,
       ExamPaperRepository examPaperRepository,
       ExamQuestionRepository examQuestionRepository,
       ExamSubmissionRepository examSubmissionRepository,
       UserRepository userRepository,
       CurrentUserService currentUserService,
+      DomainLexiconService domainLexiconService,
       DocumentTextExtractor textExtractor,
       TextChunker textChunker,
       AiClient aiClient,
       @Value("${app.knowledge.storage-dir:/tmp/bid-knowledge-files}") String knowledgeStorageDir,
       @Value("${app.upload.storage-dir:/tmp/bid-doc-uploads}") String uploadStorageDir,
-      @Qualifier("embeddingExecutor") ExecutorService embeddingExecutor) {
+      @Qualifier("embeddingExecutor") ExecutorService embeddingExecutor,
+      @Qualifier("knowledgeReindexExecutor") ExecutorService knowledgeReindexExecutor) {
     this.baseRepository = baseRepository;
     this.lexiconRepository = lexiconRepository;
+    this.kbDictionaryPackRepository = kbDictionaryPackRepository;
     this.documentRepository = documentRepository;
     this.chunkRepository = chunkRepository;
+    this.chunkTermRepository = chunkTermRepository;
     this.permissionRepository = permissionRepository;
     this.examPaperRepository = examPaperRepository;
     this.examQuestionRepository = examQuestionRepository;
     this.examSubmissionRepository = examSubmissionRepository;
     this.userRepository = userRepository;
     this.currentUserService = currentUserService;
+    this.domainLexiconService = domainLexiconService;
     this.textExtractor = textExtractor;
     this.textChunker = textChunker;
     this.aiClient = aiClient;
     this.knowledgeStorageDir = knowledgeStorageDir;
     this.uploadStorageDir = uploadStorageDir;
     this.embeddingExecutor = embeddingExecutor;
+    this.knowledgeReindexExecutor = knowledgeReindexExecutor;
   }
 
   /**
@@ -170,12 +191,7 @@ public class KnowledgeBaseService {
     baseRepository.findById(kbId).orElseThrow(EntityNotFoundException::new);
     List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
     for (KnowledgeDocument doc : docs) {
-      if ("UPLOAD".equalsIgnoreCase(doc.getSourceType())
-          && doc.getStoragePath() != null
-          && !doc.getStoragePath().isBlank()) {
-        doc.setContent(extractTextFromStoredFile(doc));
-      }
-      reindexDocument(doc);
+      enqueueReindexTask(doc.getId(), true);
     }
   }
 
@@ -196,21 +212,16 @@ public class KnowledgeBaseService {
       throw new IllegalStateException("Only knowledge base owner can delete it");
     }
 
-    List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
-    for (KnowledgeDocument doc : docs) {
-      permissionRepository.deleteByKnowledgeDocumentId(doc.getId());
-      chunkRepository.deleteByKnowledgeDocumentId(doc.getId());
-    }
+    // 批量删除，避免按文档/试卷逐条删除导致慢 SQL 和长事务。
+    // examSubmissionRepository.deleteByKnowledgeBaseId(kbId);
+    // examQuestionRepository.deleteByKnowledgeBaseId(kbId);
+    // examPaperRepository.deleteByKnowledgeBaseId(kbId);
 
-    List<ExamPaper> papers = examPaperRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
-    for (ExamPaper paper : papers) {
-      examSubmissionRepository.deleteByPaperId(paper.getId());
-      examQuestionRepository.deleteByPaperId(paper.getId());
-    }
-    examPaperRepository.deleteAll(papers);
-
+    permissionRepository.deleteByKnowledgeBaseId(kbId);
     documentRepository.deleteByKnowledgeBaseId(kbId);
+    chunkTermRepository.deleteByKnowledgeBaseId(kbId);
     chunkRepository.deleteByKnowledgeBaseId(kbId);
+    kbDictionaryPackRepository.deleteByKnowledgeBaseId(kbId);
     lexiconRepository.deleteByKnowledgeBaseId(kbId);
     baseRepository.deleteById(kbId);
   }
@@ -233,10 +244,12 @@ public class KnowledgeBaseService {
         .sourceType("MANUAL")
         .content(request.getContent())
         .visibility(KnowledgeVisibility.PRIVATE)
+        .indexStatus(INDEX_PENDING)
+        .indexMessage("已加入重建队列")
         .createdBy(currentUserService.getCurrentUserId())
         .build();
     documentRepository.save(doc);
-    reindexDocument(doc);
+    enqueueReindexTask(doc.getId(), false);
     return toDocumentResponse(doc);
   }
 
@@ -265,12 +278,12 @@ public class KnowledgeBaseService {
         .storagePath(storagePath)
         .content("")
         .visibility(KnowledgeVisibility.PRIVATE)
+        .indexStatus(INDEX_PENDING)
+        .indexMessage("上传成功，待解析并向量化")
         .createdBy(currentUserService.getCurrentUserId())
         .build();
     documentRepository.save(doc);
-    doc.setContent(extractTextFromStoredFile(doc));
-    // [AI-READ] 上传完成后立即重建向量索引，保证“上传即检索可用”。
-    reindexDocument(doc);
+    enqueueReindexTask(doc.getId(), true);
     return toDocumentResponse(doc);
   }
 
@@ -322,9 +335,7 @@ public class KnowledgeBaseService {
    */
   public List<KnowledgeDocumentResponse> listDocuments(Long kbId) {
     Long userId = currentUserService.getCurrentUserId();
-    return documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId)
-        .stream()
-        .filter(doc -> hasReadAccess(doc, userId))
+    return listAccessibleDocuments(kbId, userId).stream()
         .map(this::toDocumentResponse)
         .collect(Collectors.toList());
   }
@@ -509,17 +520,22 @@ public class KnowledgeBaseService {
    */
   public KnowledgeGraphResponse graph(Long kbId) {
     Long userId = currentUserService.getCurrentUserId();
-    List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId).stream()
-        .filter(doc -> hasReadAccess(doc, userId))
+    List<KnowledgeDocument> docs = listAccessibleDocuments(kbId, userId).stream()
         .limit(30)
         .collect(Collectors.toList());
+    if (docs.isEmpty()) {
+      return KnowledgeGraphResponse.builder().nodes(List.of()).edges(List.of()).build();
+    }
+    Set<Long> docIds = docs.stream().map(KnowledgeDocument::getId).collect(Collectors.toSet());
+    List<TermStatRow> terms = chunkTermRepository.findStatsByKnowledgeBaseIdAndKnowledgeDocumentIdIn(kbId, docIds);
+    Map<Long, List<TermStatRow>> termsByDoc = terms.stream()
+        .collect(Collectors.groupingBy(TermStatRow::getKnowledgeDocumentId));
 
     // 轻量级图谱模型（MySQL模式）：节点包含 DOCUMENT + DOMAIN_ENTITY + KEYWORD 三类
     Map<String, KnowledgeGraphNode> nodes = new LinkedHashMap<>();
     Map<String, KnowledgeGraphEdge> edges = new LinkedHashMap<>();
     Map<String, Integer> keywordWeight = new HashMap<>();
     Map<String, Integer> entityWeight = new HashMap<>();
-    Map<String, Set<String>> effectiveLexicon = buildEffectiveLexicon(kbId);
 
     for (KnowledgeDocument doc : docs) {
       String docNodeId = "doc-" + doc.getId();
@@ -530,8 +546,8 @@ public class KnowledgeBaseService {
           .value(20)
           .build());
 
-      // 关键词节点用于补充“通用语义线索”，避免图谱只剩领域词典实体。
-      Map<String, Integer> keywordFreq = extractKeywordFrequency(doc.getContent(), 6);
+      Map<String, Integer> keywordFreq = aggregateTermFrequency(
+          termsByDoc.getOrDefault(doc.getId(), List.of()), "KEYWORD", 6);
       List<String> docKeywords = new ArrayList<>(keywordFreq.keySet());
       for (Map.Entry<String, Integer> kw : keywordFreq.entrySet()) {
         String keyword = kw.getKey();
@@ -554,8 +570,8 @@ public class KnowledgeBaseService {
             .build());
       }
 
-      // 领域实体节点：承载业务语义主干（设备/故障/原因/处置等）。
-      Map<String, Integer> entities = extractDomainEntityFrequency(doc.getContent(), effectiveLexicon);
+      Map<String, Integer> entities = aggregateTermFrequency(
+          termsByDoc.getOrDefault(doc.getId(), List.of()), "DOMAIN_ENTITY", 10);
       for (Map.Entry<String, Integer> e : entities.entrySet()) {
         String entityKey = e.getKey();
         int freq = e.getValue();
@@ -575,25 +591,28 @@ public class KnowledgeBaseService {
             .build());
       }
 
-      // 关系边：句子级共现 + 类型规则，优先保证“稳定、可解释”。
-      Map<String, Integer> relationFreq = extractEntityRelations(doc.getContent(), entities.keySet());
-      for (Map.Entry<String, Integer> relation : relationFreq.entrySet()) {
-        String[] parts = relation.getKey().split("\\|", 3);
-        if (parts.length < 3) {
-          continue;
+      List<String> entityKeys = new ArrayList<>(entities.keySet());
+      for (int i = 0; i < entityKeys.size(); i++) {
+        for (int j = i + 1; j < entityKeys.size(); j++) {
+          String left = entityKeys.get(i);
+          String right = entityKeys.get(j);
+          String label = relationLabel(left, right);
+          if (label == null) {
+            continue;
+          }
+          String sourceNodeId = "ent-" + left;
+          String targetNodeId = "ent-" + right;
+          String edgeKey = sourceNodeId + "->" + targetNodeId + "#" + label;
+          int strength = Math.min(5, entities.get(left) + entities.get(right));
+          KnowledgeGraphEdge old = edges.get(edgeKey);
+          int next = old == null ? strength : old.getValue() + strength;
+          edges.put(edgeKey, KnowledgeGraphEdge.builder()
+              .source(sourceNodeId)
+              .target(targetNodeId)
+              .label(label)
+              .value(next)
+              .build());
         }
-        String sourceNodeId = "ent-" + parts[0];
-        String targetNodeId = "ent-" + parts[1];
-        String label = parts[2];
-        String edgeKey = sourceNodeId + "->" + targetNodeId + "#" + label;
-        KnowledgeGraphEdge old = edges.get(edgeKey);
-        int next = old == null ? relation.getValue() : old.getValue() + relation.getValue();
-        edges.put(edgeKey, KnowledgeGraphEdge.builder()
-            .source(sourceNodeId)
-            .target(targetNodeId)
-            .label(label)
-            .value(next)
-            .build());
       }
 
       for (int i = 0; i < docKeywords.size(); i++) {
@@ -657,26 +676,25 @@ public class KnowledgeBaseService {
    */
   public KnowledgeGraphNodeDetailResponse graphNodeDetail(Long kbId, String nodeId) {
     Long userId = currentUserService.getCurrentUserId();
-    List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId).stream()
-        .filter(doc -> hasReadAccess(doc, userId))
-        .collect(Collectors.toList());
+    List<KnowledgeDocument> docs = listAccessibleDocuments(kbId, userId);
     if (docs.isEmpty()) {
       throw new EntityNotFoundException();
     }
     Map<Long, KnowledgeDocument> docById = docs.stream()
         .collect(Collectors.toMap(KnowledgeDocument::getId, d -> d));
     Set<Long> docIds = docById.keySet();
-
     if (nodeId.startsWith("doc-")) {
       long docId = Long.parseLong(nodeId.substring(4));
       KnowledgeDocument doc = docById.get(docId);
       if (doc == null) {
         throw new EntityNotFoundException();
       }
-      List<String> keywords = new ArrayList<>(extractKeywordFrequency(doc.getContent(), 12).keySet());
-      List<KnowledgeGraphDetailChunk> chunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
-          .filter(c -> c.getKnowledgeDocument() != null && c.getKnowledgeDocument().getId().equals(docId))
-          .sorted(Comparator.comparing(KnowledgeChunk::getChunkIndex))
+      List<TermStatRow> docTerms = chunkTermRepository.findStatsByKnowledgeBaseIdAndKnowledgeDocumentIdIn(
+          kbId, List.of(docId));
+      List<String> keywords = new ArrayList<>(
+          aggregateTermFrequency(docTerms, "KEYWORD", 12).keySet());
+      List<KnowledgeGraphDetailChunk> chunks = chunkRepository
+          .findByKnowledgeBaseIdAndKnowledgeDocumentIdOrderByChunkIndexAsc(kbId, docId).stream()
           .limit(8)
           .map(c -> KnowledgeGraphDetailChunk.builder()
               .chunkId(c.getId())
@@ -709,24 +727,32 @@ public class KnowledgeBaseService {
         throw new IllegalArgumentException("Invalid keyword node");
       }
 
+      List<TermStatRow> keywordTerms = chunkTermRepository
+          .findStatsByKnowledgeBaseIdAndTermTypeAndTermKeyAndKnowledgeDocumentIdIn(kbId, "KEYWORD", keyword, docIds);
+      Map<Long, Integer> docHitMap = new HashMap<>();
+      Map<Long, Integer> chunkHitMap = new HashMap<>();
+      for (TermStatRow term : keywordTerms) {
+        Long documentId = term.getKnowledgeDocumentId();
+        Long chunkId = term.getKnowledgeChunkId();
+        docHitMap.put(documentId, docHitMap.getOrDefault(documentId, 0) + term.getFrequency());
+        chunkHitMap.put(chunkId, chunkHitMap.getOrDefault(chunkId, 0) + term.getFrequency());
+      }
+
       List<KnowledgeGraphDetailDocument> relatedDocs = docs.stream()
-          .map(doc -> {
-            int hit = countTokenHit(doc.getContent(), keyword);
-            return KnowledgeGraphDetailDocument.builder()
-                .documentId(doc.getId())
-                .title(doc.getTitle())
-                .hitCount(hit)
-                .build();
-          })
+          .map(doc -> KnowledgeGraphDetailDocument.builder()
+              .documentId(doc.getId())
+              .title(doc.getTitle())
+              .hitCount(docHitMap.getOrDefault(doc.getId(), 0))
+              .build())
           .filter(d -> d.getHitCount() != null && d.getHitCount() > 0)
           .sorted((a, b) -> Integer.compare(b.getHitCount(), a.getHitCount()))
           .limit(10)
           .collect(Collectors.toList());
 
-      List<KnowledgeGraphDetailChunk> relatedChunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
-          .filter(c -> c.getKnowledgeDocument() != null && docIds.contains(c.getKnowledgeDocument().getId()))
+      Set<Long> relatedChunkIds = chunkHitMap.keySet();
+      List<KnowledgeGraphDetailChunk> relatedChunks = (relatedChunkIds.isEmpty() ? List.<KnowledgeChunk>of()
+          : chunkRepository.findAllById(relatedChunkIds)).stream()
           .map(c -> {
-            int hit = countTokenHit(c.getContent(), keyword);
             Long documentId = c.getKnowledgeDocument().getId();
             KnowledgeDocument d = docById.get(documentId);
             return KnowledgeGraphDetailChunk.builder()
@@ -735,7 +761,7 @@ public class KnowledgeBaseService {
                 .documentTitle(d == null ? "未知文档" : d.getTitle())
                 .chunkIndex(c.getChunkIndex())
                 .snippet(snippet(c.getContent(), 180))
-                .hitCount(hit)
+                .hitCount(chunkHitMap.getOrDefault(c.getId(), 0))
                 .build();
           })
           .filter(c -> c.getHitCount() != null && c.getHitCount() > 0)
@@ -745,13 +771,18 @@ public class KnowledgeBaseService {
 
       Set<Long> relatedDocIds = relatedDocs.stream().map(KnowledgeGraphDetailDocument::getDocumentId)
           .collect(Collectors.toSet());
+      List<TermStatRow> relatedDocTerms = relatedDocIds.isEmpty() ? List.of()
+          : chunkTermRepository.findStatsByKnowledgeBaseIdAndKnowledgeDocumentIdIn(kbId, relatedDocIds);
+      Map<Long, List<TermStatRow>> relatedTermsByDoc = relatedDocTerms.stream()
+          .collect(Collectors.groupingBy(TermStatRow::getKnowledgeDocumentId));
       Map<String, Integer> kw = new HashMap<>();
       for (KnowledgeDocument d : docs) {
         if (!relatedDocIds.contains(d.getId())) {
           continue;
         }
-        for (Map.Entry<String, Integer> e : extractKeywordFrequency(d.getContent(), 20).entrySet()) {
-          if (!e.getKey().equals(keyword)) {
+        for (Map.Entry<String, Integer> e : aggregateTermFrequency(
+            relatedTermsByDoc.getOrDefault(d.getId(), List.of()), "KEYWORD", 20).entrySet()) {
+          if (!e.getKey().equalsIgnoreCase(keyword)) {
             kw.put(e.getKey(), kw.getOrDefault(e.getKey(), 0) + e.getValue());
           }
         }
@@ -782,26 +813,33 @@ public class KnowledgeBaseService {
       if (parts.length < 2) {
         throw new IllegalArgumentException("Invalid entity node");
       }
-      String entityName = parts[1];
+      List<TermStatRow> entityTerms = chunkTermRepository
+          .findStatsByKnowledgeBaseIdAndTermTypeAndTermKeyAndKnowledgeDocumentIdIn(
+              kbId, "DOMAIN_ENTITY", entityKey, docIds);
+      Map<Long, Integer> docHitMap = new HashMap<>();
+      Map<Long, Integer> chunkHitMap = new HashMap<>();
+      for (TermStatRow term : entityTerms) {
+        Long documentId = term.getKnowledgeDocumentId();
+        Long chunkId = term.getKnowledgeChunkId();
+        docHitMap.put(documentId, docHitMap.getOrDefault(documentId, 0) + term.getFrequency());
+        chunkHitMap.put(chunkId, chunkHitMap.getOrDefault(chunkId, 0) + term.getFrequency());
+      }
 
       List<KnowledgeGraphDetailDocument> relatedDocs = docs.stream()
-          .map(doc -> {
-            int hit = countTokenHit(doc.getContent(), entityName);
-            return KnowledgeGraphDetailDocument.builder()
-                .documentId(doc.getId())
-                .title(doc.getTitle())
-                .hitCount(hit)
-                .build();
-          })
+          .map(doc -> KnowledgeGraphDetailDocument.builder()
+              .documentId(doc.getId())
+              .title(doc.getTitle())
+              .hitCount(docHitMap.getOrDefault(doc.getId(), 0))
+              .build())
           .filter(d -> d.getHitCount() != null && d.getHitCount() > 0)
           .sorted((a, b) -> Integer.compare(b.getHitCount(), a.getHitCount()))
           .limit(10)
           .collect(Collectors.toList());
 
-      List<KnowledgeGraphDetailChunk> relatedChunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
-          .filter(c -> c.getKnowledgeDocument() != null && docIds.contains(c.getKnowledgeDocument().getId()))
+      Set<Long> relatedChunkIds = chunkHitMap.keySet();
+      List<KnowledgeGraphDetailChunk> relatedChunks = (relatedChunkIds.isEmpty() ? List.<KnowledgeChunk>of()
+          : chunkRepository.findAllById(relatedChunkIds)).stream()
           .map(c -> {
-            int hit = countTokenHit(c.getContent(), entityName);
             Long documentId = c.getKnowledgeDocument().getId();
             KnowledgeDocument d = docById.get(documentId);
             return KnowledgeGraphDetailChunk.builder()
@@ -810,7 +848,7 @@ public class KnowledgeBaseService {
                 .documentTitle(d == null ? "未知文档" : d.getTitle())
                 .chunkIndex(c.getChunkIndex())
                 .snippet(snippet(c.getContent(), 180))
-                .hitCount(hit)
+                .hitCount(chunkHitMap.getOrDefault(c.getId(), 0))
                 .build();
           })
           .filter(c -> c.getHitCount() != null && c.getHitCount() > 0)
@@ -820,12 +858,17 @@ public class KnowledgeBaseService {
 
       Set<Long> relatedDocIds = relatedDocs.stream().map(KnowledgeGraphDetailDocument::getDocumentId)
           .collect(Collectors.toSet());
+      List<TermStatRow> relatedDocTerms = relatedDocIds.isEmpty() ? List.of()
+          : chunkTermRepository.findStatsByKnowledgeBaseIdAndKnowledgeDocumentIdIn(kbId, relatedDocIds);
+      Map<Long, List<TermStatRow>> relatedTermsByDoc = relatedDocTerms.stream()
+          .collect(Collectors.groupingBy(TermStatRow::getKnowledgeDocumentId));
       Map<String, Integer> relatedKeywordFreq = new HashMap<>();
       for (KnowledgeDocument d : docs) {
         if (!relatedDocIds.contains(d.getId())) {
           continue;
         }
-        for (Map.Entry<String, Integer> e : extractKeywordFrequency(d.getContent(), 20).entrySet()) {
+        for (Map.Entry<String, Integer> e : aggregateTermFrequency(
+            relatedTermsByDoc.getOrDefault(d.getId(), List.of()), "KEYWORD", 20).entrySet()) {
           relatedKeywordFreq.put(e.getKey(), relatedKeywordFreq.getOrDefault(e.getKey(), 0) + e.getValue());
         }
       }
@@ -901,6 +944,77 @@ public class KnowledgeBaseService {
   }
 
   /**
+   * 入队一个文档重建任务。
+   *
+   * @param documentId            文档ID
+   * @param refreshFromStoredFile 是否先从落盘文件重新提取文本（上传文档场景）
+   */
+  private void enqueueReindexTask(Long documentId, boolean refreshFromStoredFile) {
+    String taskId = UUID.randomUUID().toString().replace("-", "");
+    KnowledgeDocument doc = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
+    doc.setIndexTaskId(taskId);
+    doc.setIndexStatus(INDEX_PENDING);
+    doc.setIndexMessage("排队中");
+    doc.setIndexedAt(null);
+    documentRepository.save(doc);
+
+    knowledgeReindexExecutor.submit(() -> runReindexTask(documentId, taskId, refreshFromStoredFile));
+  }
+
+  /**
+   * 执行文档重建任务（异步线程内）。
+   * <p>
+   * 通过 taskId 防止旧任务覆盖新任务状态。
+   */
+  private void runReindexTask(Long documentId, String taskId, boolean refreshFromStoredFile) {
+    if (!tryUpdateTaskStatus(documentId, taskId, INDEX_RUNNING, "索引重建中")) {
+      return;
+    }
+    try {
+      KnowledgeDocument doc = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
+      if (!taskId.equals(doc.getIndexTaskId())) {
+        return;
+      }
+
+      if (refreshFromStoredFile
+          && "UPLOAD".equalsIgnoreCase(doc.getSourceType())
+          && doc.getStoragePath() != null
+          && !doc.getStoragePath().isBlank()) {
+        doc.setContent(extractTextFromStoredFile(doc));
+        documentRepository.save(doc);
+      }
+
+      reindexDocument(doc);
+      tryUpdateTaskStatus(documentId, taskId, INDEX_SUCCESS, "索引完成");
+    } catch (Exception ex) {
+      String message = ex.getMessage() == null ? "索引失败" : ex.getMessage();
+      if (message.length() > 900) {
+        message = message.substring(0, 900);
+      }
+      tryUpdateTaskStatus(documentId, taskId, INDEX_FAILED, message);
+    }
+  }
+
+  /**
+   * CAS 风格更新任务状态：仅当前任务仍是最新 taskId 时才更新。
+   */
+  private boolean tryUpdateTaskStatus(Long documentId, String taskId, String status, String message) {
+    KnowledgeDocument doc = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
+    if (!taskId.equals(doc.getIndexTaskId())) {
+      return false;
+    }
+    doc.setIndexStatus(status);
+    doc.setIndexMessage(message);
+    if (INDEX_SUCCESS.equals(status) || INDEX_FAILED.equals(status)) {
+      doc.setIndexedAt(Instant.now());
+    } else {
+      doc.setIndexedAt(null);
+    }
+    documentRepository.save(doc);
+    return true;
+  }
+
+  /**
    * 对文档重新建立索引。
    * <p>
    * 每次内容变更时从零开始重建分块和向量，保证索引的确定性和一致性。
@@ -910,6 +1024,7 @@ public class KnowledgeBaseService {
    */
   private void reindexDocument(KnowledgeDocument doc) {
     // 删除旧索引，避免历史脏块影响召回质量。
+    chunkTermRepository.deleteByKnowledgeDocumentId(doc.getId());
     chunkRepository.deleteByKnowledgeDocumentId(doc.getId());
     // 章节感知切分优先保留“同章节语义连贯性”。
     List<String> rawChunks = textChunker.splitBySections(doc.getContent(), 900, 140);
@@ -918,17 +1033,24 @@ public class KnowledgeBaseService {
     // [AI-READ] 表格双轨：正文分块之外，额外生成结构化表格 JSON 分块，便于精确检索。
     chunks.addAll(extractTableJsonChunks(doc.getContent()));
 
+    // *领域词典处理 */
+    Map<String, Map<String, String>> aliasMap = domainLexiconService
+        .buildEffectiveLexiconAliasMap(doc.getKnowledgeBase().getId());
+
+    List<String> embeddingChunks = chunks.stream().map(chunk -> normalizeChunkByLexicon(chunk, aliasMap)).toList();
+
     // 并行调用 embedding API：各 chunk 之间互相独立，线程池控制并发数。
     @SuppressWarnings("unchecked")
     CompletableFuture<List<Double>>[] futures = new CompletableFuture[chunks.size()];
     for (int i = 0; i < chunks.size(); i++) {
-      final String content = chunks.get(i);
+      final String content = embeddingChunks.get(i);
       futures[i] = CompletableFuture.supplyAsync(() -> aiClient.embedding(content), embeddingExecutor);
     }
     // 等待全部完成
     CompletableFuture.allOf(futures).join();
 
-    // 按原始顺序收集结果并批量持久化
+    // 按原始顺序收集结果并持久化；同时缓存关键词/实体，供图谱直接读取，避免在线重复抽取。
+    List<KnowledgeChunkTerm> terms = new ArrayList<>();
     for (int i = 0; i < chunks.size(); i++) {
       List<Double> embedding = futures[i].join();
       KnowledgeChunk chunk = KnowledgeChunk.builder()
@@ -940,6 +1062,35 @@ public class KnowledgeBaseService {
           .embeddingDim(embedding.size())
           .build();
       chunkRepository.save(chunk);
+
+      Map<String, Integer> keywordFreq = extractKeywordFrequency(chunks.get(i), 10);
+      for (Map.Entry<String, Integer> e : keywordFreq.entrySet()) {
+        terms.add(KnowledgeChunkTerm.builder()
+            .knowledgeBase(doc.getKnowledgeBase())
+            .knowledgeDocument(doc)
+            .knowledgeChunk(chunk)
+            .termType("KEYWORD")
+            .termKey(e.getKey())
+            .termName(e.getKey())
+            .frequency(e.getValue())
+            .build());
+      }
+
+      Map<String, Integer> entityFreq = extractDomainEntityFrequency(chunks.get(i), aliasMap);
+      for (Map.Entry<String, Integer> e : entityFreq.entrySet()) {
+        terms.add(KnowledgeChunkTerm.builder()
+            .knowledgeBase(doc.getKnowledgeBase())
+            .knowledgeDocument(doc)
+            .knowledgeChunk(chunk)
+            .termType("DOMAIN_ENTITY")
+            .termKey(e.getKey())
+            .termName(readableEntityName(e.getKey()))
+            .frequency(e.getValue())
+            .build());
+      }
+    }
+    if (!terms.isEmpty()) {
+      chunkTermRepository.saveAll(terms);
     }
   }
 
@@ -1090,18 +1241,21 @@ public class KnowledgeBaseService {
    * <p>
    * 使用“基础词典 + 知识库自定义词典”做匹配计数，确保行为可审计、可解释。
    */
-  private Map<String, Integer> extractDomainEntityFrequency(String content, Map<String, Set<String>> lexicon) {
+  private Map<String, Integer> extractDomainEntityFrequency(String content, Map<String, Map<String, String>> lexicon) {
     if (content == null || content.isBlank()) {
       return Map.of();
     }
     String lower = content.toLowerCase();
     Map<String, Integer> result = new LinkedHashMap<>();
-    for (Map.Entry<String, Set<String>> entry : lexicon.entrySet()) {
+    for (Map.Entry<String, Map<String, String>> entry : lexicon.entrySet()) {
       String category = entry.getKey();
-      for (String term : entry.getValue()) {
-        int hit = countTokenHit(lower, term.toLowerCase());
+      for (Map.Entry<String, String> aliasEntry : entry.getValue().entrySet()) {
+        String alias = aliasEntry.getKey();
+        String standardTerm = aliasEntry.getValue();
+        int hit = countTokenHit(lower, alias.toLowerCase());
         if (hit > 0) {
-          result.put(category + "|" + term, hit);
+          String key = category + "|" + standardTerm;
+          result.put(key, result.getOrDefault(key, 0) + hit);
         }
       }
     }
@@ -1111,18 +1265,9 @@ public class KnowledgeBaseService {
         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, LinkedHashMap::new));
   }
 
-  private Map<String, Set<String>> buildEffectiveLexicon(Long kbId) {
-    // 仅从数据库动态加载启用词典，不再使用代码内置词典。
-    Map<String, Set<String>> merged = new LinkedHashMap<>();
-    for (KnowledgeBaseDomainLexicon item : lexiconRepository.findByKnowledgeBaseIdAndEnabledTrue(kbId)) {
-      String category = item.getCategory() == null ? "" : item.getCategory().trim().toUpperCase();
-      String term = item.getTerm() == null ? "" : item.getTerm().trim();
-      if (category.isBlank() || term.isBlank()) {
-        continue;
-      }
-      merged.computeIfAbsent(category, k -> new HashSet<>()).add(term);
-    }
-    return merged;
+  private Map<String, Map<String, String>> buildEffectiveLexicon(Long kbId) {
+    // 全局词典包 + 知识库本地词条（含同义词归一）动态合并。
+    return domainLexiconService.buildEffectiveLexiconAliasMap(kbId);
   }
 
   /**
@@ -1284,6 +1429,59 @@ public class KnowledgeBaseService {
     if (content == null || content.isBlank()) {
       return Map.of();
     }
+    Map<String, Integer> aiResult = extractKeywordFrequencyByAi(content, limit);
+    if (!aiResult.isEmpty()) {
+      return aiResult;
+    }
+    return extractKeywordFrequencyFallback(content, limit);
+  }
+
+  /**
+   * AI 优先关键词提取：提取失败或结果无效时返回空，交由规则兜底。
+   */
+  private Map<String, Integer> extractKeywordFrequencyByAi(String content, int limit) {
+    try {
+      String raw = aiClient.extractKeywordFrequency(content);
+      if (raw == null || raw.isBlank()) {
+        return Map.of();
+      }
+      String json = extractJsonObject(raw.trim());
+      JsonNode root = MAPPER.readTree(json);
+      if (!root.isObject()) {
+        return Map.of();
+      }
+      Map<String, Integer> freq = new HashMap<>();
+      root.fields().forEachRemaining(entry -> {
+        String key = normalizeKeyword(entry.getKey());
+        if (key == null) {
+          return;
+        }
+        JsonNode valueNode = entry.getValue();
+        if (valueNode == null || !valueNode.isNumber()) {
+          return;
+        }
+        int count = Math.max(0, valueNode.asInt());
+        if (count <= 0) {
+          return;
+        }
+        freq.put(key, freq.getOrDefault(key, 0) + count);
+      });
+      return freq.entrySet().stream()
+          .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+          .limit(limit)
+          .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, LinkedHashMap::new));
+    } catch (Exception ignore) {
+      return Map.of();
+    }
+  }
+
+  /**
+   * 规则兜底关键词提取（旧方案）。
+   */
+  private Map<String, Integer> extractKeywordFrequencyFallback(String content, int limit) {
+    if (content == null || content.isBlank()) {
+      return Map.of();
+    }
     String input = content.length() > 6000 ? content.substring(0, 6000) : content;
     Map<String, Integer> freq = new HashMap<>();
     for (String token : TOKEN_SPLIT.split(input)) {
@@ -1307,6 +1505,56 @@ public class KnowledgeBaseService {
         continue;
       }
       freq.put(t, freq.getOrDefault(t, 0) + 1);
+    }
+    return freq.entrySet().stream()
+        .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+        .limit(limit)
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (a, b) -> a, LinkedHashMap::new));
+  }
+
+  /**
+   * 关键词归一化与过滤：过滤噪声词，避免脏关键词进入图谱。
+   */
+  private String normalizeKeyword(String keyword) {
+    if (keyword == null) {
+      return null;
+    }
+    String t = keyword.trim().toLowerCase().replaceAll("\\s+", " ");
+    if (t.isBlank()) {
+      return null;
+    }
+    if (t.length() < 2 || t.length() > 24) {
+      return null;
+    }
+    if (t.matches("^\\d+$")) {
+      return null;
+    }
+    if (t.matches("^\\d+[a-z]+$") || t.matches("^[a-z]+\\d+$")) {
+      return null;
+    }
+    if (t.length() <= 2 && t.matches("^[a-z]+$")) {
+      return null;
+    }
+    if (STOPWORDS.contains(t)) {
+      return null;
+    }
+    return t;
+  }
+
+  private Map<String, Integer> aggregateTermFrequency(List<TermStatRow> terms, String termType, int limit) {
+    if (terms == null || terms.isEmpty()) {
+      return Map.of();
+    }
+    Map<String, Integer> freq = new HashMap<>();
+    for (TermStatRow term : terms) {
+      if (term == null || term.getTermType() == null || term.getTermKey() == null) {
+        continue;
+      }
+      if (!termType.equalsIgnoreCase(term.getTermType())) {
+        continue;
+      }
+      int count = term.getFrequency() == null ? 1 : Math.max(1, term.getFrequency());
+      freq.put(term.getTermKey(), freq.getOrDefault(term.getTermKey(), 0) + count);
     }
     return freq.entrySet().stream()
         .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
@@ -1355,6 +1603,39 @@ public class KnowledgeBaseService {
   }
 
   /**
+   * 基于领域词典对分块文本做术语归一。
+   * <p>
+   * 用于 embedding 入参预处理：将别名替换为标准术语。
+   *
+   * @param text     原始分块文本
+   * @param aliasMap 词典映射（category -> alias -> standardTerm）
+   * @return 归一化后的文本
+   */
+  private String normalizeChunkByLexicon(String text, Map<String, Map<String, String>> aliasMap) {
+    if (text == null || text.isBlank() || aliasMap == null || aliasMap.isEmpty()) {
+      return text;
+    }
+    String normalized = text;
+    for (Map<String, String> categoryMap : aliasMap.values()) {
+      if (categoryMap == null || categoryMap.isEmpty()) {
+        continue;
+      }
+      List<Map.Entry<String, String>> entries = categoryMap.entrySet().stream()
+          .sorted((a, b) -> Integer.compare(b.getKey().length(), a.getKey().length()))
+          .toList();
+      for (Map.Entry<String, String> entry : entries) {
+        String alias = entry.getKey();
+        String standard = entry.getValue();
+        if (alias == null || standard == null || alias.isBlank() || standard.isBlank() || alias.equals(standard)) {
+          continue;
+        }
+        normalized = normalized.replace(alias, standard);
+      }
+    }
+    return normalized;
+  }
+
+  /**
    * 获取指定知识库中当前用户有权访问的所有文档ID集合。
    *
    * @param kbId   知识库ID
@@ -1362,36 +1643,34 @@ public class KnowledgeBaseService {
    * @return 可访问的文档ID集合
    */
   private Set<Long> listAccessibleDocumentIds(Long kbId, Long userId) {
-    List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
-    return docs.stream()
-        .filter(doc -> hasReadAccess(doc, userId))
+    return listAccessibleDocuments(kbId, userId).stream()
         .map(KnowledgeDocument::getId)
         .collect(Collectors.toSet());
   }
 
   /**
-   * 判断指定用户是否对某文档有读取权限。
-   * <p>
-   * 权限判定优先级：
-   * 1. 公开文档 (PUBLIC) → 所有人可读
-   * 2. 文档创建者 → 可读
-   * 3. 被授权用户 → 可读
+   * 一次性加载当前用户可访问的文档，避免逐文档权限查询的 N+1 问题。
    *
-   * @param doc    知识文档
+   * @param kbId   知识库ID
    * @param userId 用户ID
-   * @return 是否有读取权限
+   * @return 可访问文档列表
    */
-  private boolean hasReadAccess(KnowledgeDocument doc, Long userId) {
-    if (doc.getVisibility() == KnowledgeVisibility.PUBLIC) {
-      return true;
+  private List<KnowledgeDocument> listAccessibleDocuments(Long kbId, Long userId) {
+    List<KnowledgeDocument> docs = documentRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
+    if (docs.isEmpty()) {
+      return List.of();
     }
     if (userId == null) {
-      return false;
+      return docs.stream().filter(doc -> doc.getVisibility() == KnowledgeVisibility.PUBLIC).toList();
     }
-    if (userId.equals(doc.getCreatedBy())) {
-      return true;
-    }
-    return permissionRepository.findByKnowledgeDocumentIdAndUserId(doc.getId(), userId).isPresent();
+    Set<Long> grantedDocIds = permissionRepository.findByUserId(userId).stream()
+        .map(KnowledgeDocumentPermission::getKnowledgeDocumentId)
+        .collect(Collectors.toSet());
+    return docs.stream()
+        .filter(doc -> doc.getVisibility() == KnowledgeVisibility.PUBLIC
+            || userId.equals(doc.getCreatedBy())
+            || grantedDocIds.contains(doc.getId()))
+        .toList();
   }
 
   /**
@@ -1483,7 +1762,8 @@ public class KnowledgeBaseService {
   }
 
   private String storeKnowledgeImage(KnowledgeDocument doc, DocumentTextExtractor.ExtractedImage image) {
-    String ext = image.getExtension() == null || image.getExtension().isBlank() ? "png" : image.getExtension().toLowerCase();
+    String ext = image.getExtension() == null || image.getExtension().isBlank() ? "png"
+        : image.getExtension().toLowerCase();
     LocalDate now = LocalDate.now();
     String dateDir = now.format(DateTimeFormatter.BASIC_ISO_DATE);
     String filename = "kb" + doc.getKnowledgeBase().getId() + "_doc" + doc.getId() + "_img"
@@ -1518,6 +1798,9 @@ public class KnowledgeBaseService {
 
   /** 将知识文档实体转换为响应 DTO。 */
   private KnowledgeDocumentResponse toDocumentResponse(KnowledgeDocument doc) {
+    String indexStatus = doc.getIndexStatus() == null || doc.getIndexStatus().isBlank()
+        ? INDEX_SUCCESS
+        : doc.getIndexStatus();
     return KnowledgeDocumentResponse.builder()
         .id(doc.getId())
         .knowledgeBaseId(doc.getKnowledgeBase().getId())
@@ -1527,6 +1810,9 @@ public class KnowledgeBaseService {
         .fileType(doc.getFileType())
         .storagePath(doc.getStoragePath())
         .visibility(doc.getVisibility().name())
+        .indexStatus(indexStatus)
+        .indexMessage(doc.getIndexMessage())
+        .indexedAt(doc.getIndexedAt())
         .createdAt(doc.getCreatedAt())
         .build();
   }
@@ -1542,4 +1828,5 @@ public class KnowledgeBaseService {
         .embeddingDim(chunk.getEmbeddingDim())
         .build();
   }
+
 }

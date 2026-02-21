@@ -13,6 +13,7 @@ import com.bidcollab.repository.DocumentExportRepository;
 import com.bidcollab.repository.DocumentRepository;
 import com.bidcollab.repository.SectionRepository;
 import jakarta.persistence.EntityNotFoundException;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -49,17 +50,22 @@ public class ExportService {
   }
 
   /**
-   * 导出文档为指定格式（docx / pdf）。
+   * 导出文档为指定格式（docx/pdf）。
    * 注意：不使用方法级 @Transactional，避免导出异常触发事务回滚导致 errorMessage 丢失。
    * 创建记录和更新状态均使用 saveAndFlush 立即持久化。
    */
-  public ExportResponse export(Long documentId, String format) {
+  public ExportResponse export(Long documentId, String format, String versionNo) {
     Document document = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
+    String normalizedFormat = format == null ? "" : format.trim().toLowerCase();
+    if (!"docx".equals(normalizedFormat) && !"pdf".equals(normalizedFormat)) {
+      throw new IllegalArgumentException("Unsupported format: " + format);
+    }
 
     // 先创建导出记录并立即持久化，确保数据库中有 RUNNING 状态的记录
     DocumentExport export = DocumentExport.builder()
         .documentId(documentId)
-        .format(format)
+        .format(normalizedFormat)
+        .versionNo(versionNo)
         .status(ExportStatus.RUNNING)
         .startedAt(Instant.now())
         .createdBy(currentUserService.getCurrentUserId())
@@ -69,15 +75,15 @@ public class ExportService {
     try {
       List<Section> sections = sectionRepository.findForExportByDocumentId(documentId);
       List<FlattenedSection> flattened = flatten(sections);
-      String fileName = "document-" + documentId + "-" + export.getId() + "." + format;
+      String fileName = "document-" + documentId + "-" + export.getId() + "." + normalizedFormat;
       Path outputPath = Path.of(baseDir, fileName);
       ExportImageLoader imageLoader = new ExportImageLoader(uploadDir);
-      if ("docx".equalsIgnoreCase(format)) {
+      if ("docx".equalsIgnoreCase(normalizedFormat)) {
         new DocxExporter(imageLoader).export(document.getName(), flattened, outputPath);
-      } else if ("pdf".equalsIgnoreCase(format)) {
+      } else if ("pdf".equalsIgnoreCase(normalizedFormat)) {
         new PdfExporter(imageLoader).export(document.getName(), flattened, outputPath);
       } else {
-        throw new IllegalArgumentException("Unsupported format: " + format);
+        throw new IllegalArgumentException("Unsupported format: " + normalizedFormat);
       }
       export.setStatus(ExportStatus.SUCCESS);
       export.setFilePath(outputPath.toString());
@@ -100,6 +106,18 @@ public class ExportService {
 
   public List<DocumentExport> listExports(Long documentId) {
     return exportRepository.findByDocumentIdOrderByCreatedAtDesc(documentId);
+  }
+
+  public void deleteExport(Long exportId) {
+    DocumentExport export = exportRepository.findById(exportId).orElseThrow(EntityNotFoundException::new);
+    if (export.getFilePath() != null && !export.getFilePath().isBlank()) {
+      try {
+        java.nio.file.Files.deleteIfExists(Path.of(export.getFilePath()));
+      } catch (IOException ex) {
+        log.warn("Failed to delete export file: {}", export.getFilePath(), ex);
+      }
+    }
+    exportRepository.delete(export);
   }
 
   private List<FlattenedSection> flatten(List<Section> sections) {
@@ -150,6 +168,7 @@ public class ExportService {
         .id(export.getId())
         .documentId(export.getDocumentId())
         .format(export.getFormat())
+        .versionNo(export.getVersionNo())
         .status(export.getStatus())
         .filePath(export.getFilePath())
         .errorMessage(export.getErrorMessage())

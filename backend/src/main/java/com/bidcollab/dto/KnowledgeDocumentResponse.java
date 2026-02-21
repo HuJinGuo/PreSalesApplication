@@ -15,5 +15,8 @@ public class KnowledgeDocumentResponse {
   private String fileType;
   private String storagePath;
   private String visibility;
+  private String indexStatus;
+  private String indexMessage;
+  private Instant indexedAt;
   private Instant createdAt;
 }

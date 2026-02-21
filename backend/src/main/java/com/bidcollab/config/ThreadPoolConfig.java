@@ -36,4 +36,20 @@ public class ThreadPoolConfig {
             return t;
         });
     }
+
+    /**
+     * 知识库重建索引任务线程池（文档级）。
+     * <p>
+     * 用于异步执行“解析+分块+向量化+关键词缓存”，避免上传接口长时间阻塞。
+     */
+    @Bean(name = "knowledgeReindexExecutor", destroyMethod = "shutdown")
+    public ExecutorService knowledgeReindexExecutor(
+            @Value("${app.knowledge.reindex-concurrency:2}") int concurrency) {
+        int poolSize = Math.max(1, concurrency);
+        return Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "knowledge-reindex-worker");
+            t.setDaemon(true);
+            return t;
+        });
+    }
 }

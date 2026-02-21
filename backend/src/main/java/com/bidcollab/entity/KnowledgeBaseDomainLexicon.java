@@ -30,10 +30,12 @@ public class KnowledgeBaseDomainLexicon extends BaseEntity {
   @Column(nullable = false, length = 255)
   private String term;
 
+  @Column(name = "standard_term", length = 255)
+  private String standardTerm;
+
   @Column(nullable = false)
   private Boolean enabled;
 
   @Column(name = "created_by")
   private Long createdBy;
 }
-

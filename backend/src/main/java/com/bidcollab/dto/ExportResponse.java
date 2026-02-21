@@ -11,6 +11,7 @@ public class ExportResponse {
   private Long id;
   private Long documentId;
   private String format;
+  private String versionNo;
   private ExportStatus status;
   private String filePath;
   private String errorMessage;

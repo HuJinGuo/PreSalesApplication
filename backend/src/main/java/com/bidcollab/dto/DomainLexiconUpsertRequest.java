@@ -12,6 +12,6 @@ public class DomainLexiconUpsertRequest {
   private String category;
   @NotBlank
   private String term;
+  private String standardTerm;
   private Boolean enabled;
 }
-
