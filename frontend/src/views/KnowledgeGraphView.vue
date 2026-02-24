@@ -47,6 +47,19 @@
         </el-table-column>
         <el-table-column prop="chunkIndex" label="段序" width="90" />
         <el-table-column prop="embeddingDim" label="向量维度" width="100" />
+        <el-table-column label="关键词" min-width="220">
+          <template #default="scope">
+            <div class="kw-cell">
+              <el-tag
+                v-for="kw in (scope.row.keywords || []).slice(0, 4)"
+                :key="kw"
+                size="small"
+                effect="plain"
+              >{{ kw }}</el-tag>
+              <span v-if="!scope.row.keywords || scope.row.keywords.length === 0" class="kw-empty">-</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="内容片段" min-width="360">
           <template #default="scope">
             <div class="chunk-cell">
@@ -134,6 +147,16 @@
           </div>
         </div>
         <div class="vector-content-card">
+          <div class="node-section-title">关键词</div>
+          <div class="keywords" style="margin-bottom: 10px">
+            <el-tag
+              v-for="kw in (currentChunk?.keywords || [])"
+              :key="kw"
+              size="small"
+              effect="plain"
+            >{{ kw }}</el-tag>
+            <span v-if="!currentChunk?.keywords || currentChunk.keywords.length === 0" class="kw-empty">暂无关键词</span>
+          </div>
           <div class="node-section-title">内容片段</div>
           <pre class="vector-box">{{ currentChunk?.content || '暂无内容' }}</pre>
         </div>
@@ -475,6 +498,17 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.kw-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.kw-empty {
+  color: #94a3b8;
+  font-size: 12px;
 }
 
 .chunk-text {

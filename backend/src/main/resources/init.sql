@@ -66,6 +66,47 @@ CREATE TABLE IF NOT EXISTS section_version (
   CONSTRAINT fk_section_version_section FOREIGN KEY (section_id) REFERENCES section(id)
 );
 
+CREATE TABLE IF NOT EXISTS section_chunk_ref (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  section_id BIGINT NOT NULL,
+  section_version_id BIGINT NULL,
+  paragraph_index INT NOT NULL,
+  chunk_id BIGINT NOT NULL,
+  quote_text TEXT,
+  created_by BIGINT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_section_chunk_ref_section FOREIGN KEY (section_id) REFERENCES section(id),
+  CONSTRAINT fk_section_chunk_ref_version FOREIGN KEY (section_version_id) REFERENCES section_version(id)
+);
+SET @idx_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'section_chunk_ref'
+    AND INDEX_NAME = 'idx_section_chunk_ref_section'
+);
+SET @sql = IF(@idx_exists = 0,
+  'CREATE INDEX idx_section_chunk_ref_section ON section_chunk_ref(section_id, paragraph_index)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @idx_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'section_chunk_ref'
+    AND INDEX_NAME = 'idx_section_chunk_ref_chunk'
+);
+SET @sql = IF(@idx_exists = 0,
+  'CREATE INDEX idx_section_chunk_ref_chunk ON section_chunk_ref(chunk_id)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
 CREATE TABLE IF NOT EXISTS section_asset (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   section_id BIGINT NOT NULL,
@@ -535,54 +576,54 @@ PREPARE stmt_add_fk_section_current_version FROM @add_fk_section_current_version
 EXECUTE stmt_add_fk_section_current_version;
 DEALLOCATE PREPARE stmt_add_fk_section_current_version;
 
-INSERT IGNORE INTO app_user (id, username, password_hash, real_name, dept, department_id, status)
-VALUES (1, 'admin', '{noop}admin123', '管理员', '售前解决方案部', NULL, 'ACTIVE');
+-- INSERT IGNORE INTO app_user (id, username, password_hash, real_name, dept, department_id, status)
+-- VALUES (1, 'admin', '{noop}admin123', '管理员', '售前解决方案部', NULL, 'ACTIVE');
 
-INSERT IGNORE INTO department (id, code, name, manager_name, status)
-VALUES
-  (1, 'PRESALES', '售前解决方案部', '张工', 'ACTIVE'),
-  (2, 'KNOWLEDGE', '知识运营部', '李工', 'ACTIVE'),
-  (3, 'MARKET', '市场培训部', '王工', 'ACTIVE');
+-- INSERT IGNORE INTO department (id, code, name, manager_name, status)
+-- VALUES
+--   (1, 'PRESALES', '售前解决方案部', '张工', 'ACTIVE'),
+--   (2, 'KNOWLEDGE', '知识运营部', '李工', 'ACTIVE'),
+--   (3, 'MARKET', '市场培训部', '王工', 'ACTIVE');
 
-UPDATE app_user SET department_id = 1 WHERE id = 1 AND department_id IS NULL;
+-- UPDATE app_user SET department_id = 1 WHERE id = 1 AND department_id IS NULL;
 
-INSERT IGNORE INTO role (id, code, name)
-VALUES
-  (1, 'ADMIN', '系统管理员'),
-  (2, 'PRE_SALES', '售前工程师'),
-  (3, 'MARKET', '市场人员');
+-- INSERT IGNORE INTO role (id, code, name)
+-- VALUES
+--   (1, 'ADMIN', '系统管理员'),
+--   (2, 'PRE_SALES', '售前工程师'),
+--   (3, 'MARKET', '市场人员');
 
-INSERT IGNORE INTO user_role (user_id, role_id)
-VALUES (1, 1);
+-- INSERT IGNORE INTO user_role (user_id, role_id)
+-- VALUES (1, 1);
 
-INSERT IGNORE INTO app_menu (id, parent_id, title, path, icon, sort_index, visible)
-VALUES
-  (1, NULL, '项目管理', '/projects', 'Folder', 10, 1),
-  (2, NULL, '知识中心', NULL, 'Collection', 20, 1),
-  (3, 2, '知识库', '/knowledge', 'Document', 21, 1),
-  (4, 2, '领域词典中心', '/domain-lexicons', 'Tickets', 22, 1),
-  (5, 2, '知识图谱', '/knowledge-graph', 'Share', 23, 1),
-  (6, NULL, '审核中心', '/reviews', 'Checked', 30, 1),
-  (7, NULL, '基础信息管理', NULL, 'Setting', 40, 1),
-  (8, 7, '部门管理', '/base/depts', 'OfficeBuilding', 41, 1),
-  (9, 7, '用户管理', '/base/users', 'UserFilled', 42, 1),
-  (10, 7, '角色管理', '/base/roles', 'Avatar', 43, 1),
-  (11, 7, '菜单管理', '/base/menus', 'Menu', 44, 1),
-  (12, NULL, '章节资产库', '/assets', 'Document', 90, 0),
-  (13, NULL, '考试中心', '/exams', 'Reading', 91, 0);
+-- INSERT IGNORE INTO app_menu (id, parent_id, title, path, icon, sort_index, visible)
+-- VALUES
+--   (1, NULL, '项目管理', '/projects', 'Folder', 10, 1),
+--   (2, NULL, '知识中心', NULL, 'Collection', 20, 1),
+--   (3, 2, '知识库', '/knowledge', 'Document', 21, 1),
+--   (4, 2, '领域词典中心', '/domain-lexicons', 'Tickets', 22, 1),
+--   (5, 2, '知识图谱', '/knowledge-graph', 'Share', 23, 1),
+--   (6, NULL, '审核中心', '/reviews', 'Checked', 30, 1),
+--   (7, NULL, '基础信息管理', NULL, 'Setting', 40, 1),
+--   (8, 7, '部门管理', '/base/depts', 'OfficeBuilding', 41, 1),
+--   (9, 7, '用户管理', '/base/users', 'UserFilled', 42, 1),
+--   (10, 7, '角色管理', '/base/roles', 'Avatar', 43, 1),
+--   (11, 7, '菜单管理', '/base/menus', 'Menu', 44, 1),
+--   (12, NULL, '章节资产库', '/assets', 'Document', 90, 0),
+--   (13, NULL, '考试中心', '/exams', 'Reading', 91, 0);
 
-INSERT IGNORE INTO role_menu (role_id, menu_id)
-SELECT 1, m.id FROM app_menu m;
+-- INSERT IGNORE INTO role_menu (role_id, menu_id)
+-- SELECT 1, m.id FROM app_menu m;
 
-INSERT IGNORE INTO role_menu (role_id, menu_id)
-VALUES
-  (2, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6),
-  (3, 2), (3, 3), (3, 4), (3, 5);
+-- INSERT IGNORE INTO role_menu (role_id, menu_id)
+-- VALUES
+--   (2, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6),
+--   (3, 2), (3, 3), (3, 4), (3, 5);
 
-INSERT IGNORE INTO domain_dictionary_pack (id, code, name, scope_type, status, description, created_by)
-VALUES
-  (1, 'ENV_COMMON', '环保行业词典', 'GLOBAL', 'ACTIVE', '环境监测行业通用术语', 1),
-  (2, 'IT_COMMON', '通用IT架构词典', 'GLOBAL', 'ACTIVE', 'IT系统架构术语与同义词', 1);
+-- INSERT IGNORE INTO domain_dictionary_pack (id, code, name, scope_type, status, description, created_by)
+-- VALUES
+--   (1, 'ENV_COMMON', '环保行业词典', 'GLOBAL', 'ACTIVE', '环境监测行业通用术语', 1),
+--   (2, 'IT_COMMON', '通用IT架构词典', 'GLOBAL', 'ACTIVE', 'IT系统架构术语与同义词', 1);
 
 SET @idx_exam_share_exists := (
   SELECT COUNT(1)

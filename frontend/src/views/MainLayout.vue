@@ -185,14 +185,25 @@ const assistantLoading = ref(false)
 const assistantAnswer = ref('')
 const assistantCitations = ref<any[]>([])
 const knowledgeBases = ref<any[]>([])
+const imgMarkerToMarkdown = (input: string) => {
+  if (!input) return ''
+  return input.replace(/\[img(?:\s+([^\]]+))?](\S+)/gi, (_m, attrsRaw = '', url = '') => {
+    const attrs = String(attrsRaw || '')
+    const captionMatch = attrs.match(/caption=(?:"([^"]*)"|'([^']*)'|(\S+))/i)
+    const alt = (captionMatch?.[1] || captionMatch?.[2] || captionMatch?.[3] || 'image').replace(/"/g, '')
+    return `![${alt}](${url})`
+  })
+}
 const assistantAnswerHtml = computed(() => {
   if (!assistantAnswer.value) return ''
-  const raw = marked.parse(assistantAnswer.value, { gfm: true, breaks: true, async: false }) as string
+  const normalized = imgMarkerToMarkdown(assistantAnswer.value)
+  const raw = marked.parse(normalized, { gfm: true, breaks: true, async: false }) as string
   return DOMPurify.sanitize(raw)
 })
 const renderMarkdown = (input: string) => {
   if (!input) return ''
-  const raw = marked.parse(input, { gfm: true, breaks: true, async: false }) as string
+  const normalized = imgMarkerToMarkdown(input)
+  const raw = marked.parse(normalized, { gfm: true, breaks: true, async: false }) as string
   return DOMPurify.sanitize(raw)
 }
 

@@ -1,6 +1,7 @@
 package com.bidcollab.controller;
 
 import com.bidcollab.dto.SectionCreateRequest;
+import com.bidcollab.dto.SectionChunkRefResponse;
 import com.bidcollab.dto.SectionMoveRequest;
 import com.bidcollab.dto.SectionTreeNode;
 import com.bidcollab.dto.SectionUpdateRequest;
@@ -76,5 +77,10 @@ public class SectionController {
   @PostMapping("/sections/{id}/versions")
   public SectionVersionResponse createVersion(@PathVariable("id") Long id, @Valid @RequestBody SectionVersionCreateRequest request) {
     return sectionService.createVersion(id, request, SectionSourceType.MANUAL, null);
+  }
+
+  @GetMapping("/sections/{id}/chunk-refs")
+  public List<SectionChunkRefResponse> listChunkRefs(@PathVariable("id") Long id) {
+    return sectionService.listChunkRefs(id);
   }
 }

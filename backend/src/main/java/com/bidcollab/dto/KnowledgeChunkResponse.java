@@ -1,5 +1,6 @@
 package com.bidcollab.dto;
 
+import java.util.List;
 import lombok.Builder;
 import lombok.Data;
 
@@ -12,4 +13,5 @@ public class KnowledgeChunkResponse {
   private Integer chunkIndex;
   private String content;
   private Integer embeddingDim;
+  private List<String> keywords;
 }

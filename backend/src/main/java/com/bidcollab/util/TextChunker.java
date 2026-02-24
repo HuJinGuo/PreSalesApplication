@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 public class TextChunker {
   // [AI-READ] 文本切分策略：优先章节切分，保障语义完整性。
   private static final Pattern HEADING_PATTERN = Pattern.compile(
-      "^(#{1,6}\\s+.+|第[一二三四五六七八九十百0-9]+[章节部分篇].*|[0-9]+(\\.[0-9]+){0,3}\\s+.+)$");
+      "^(#{1,6}\\s+.+|第[一二三四五六七八九十百0-9]+[章节部分篇].*|(?:[0-9]+(?:\\.[0-9]+){1,4}|[0-9]+[、.)])\\s+.+)$");
 
   /**
    * 基础分块方法：按固定长度切分文本，并保留重叠部分。
@@ -158,6 +158,14 @@ public class TextChunker {
    */
   private boolean isHeadingLine(String line) {
     if (line.length() > 80) {
+      return false;
+    }
+    // 表格行（管道分隔）不应被当作标题，否则会生成错误的 section 前缀。
+    if (line.contains("|")) {
+      return false;
+    }
+    // 纯数字/年份类行也不应作为标题（如 2025）。
+    if (line.matches("^\\d{2,}$")) {
       return false;
     }
     return HEADING_PATTERN.matcher(line).matches();

@@ -3,9 +3,16 @@ server:
 
 spring:
   datasource:
-    url: jdbc:mysql://127.0.0.1:13307/ai_smart?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://127.0.0.1:13307/ai_smart?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&autoReconnect=true
     username: root
     password: qwe123999mn@123
+    hikari:
+      connection-test-query: SELECT 1
+      minimum-idle: 2
+      maximum-pool-size: 20
+      idle-timeout: 300000
+      max-lifetime: 900000
+      keepalive-time: 300000
   jpa:
     hibernate:
       ddl-auto: validate
@@ -15,7 +22,7 @@ spring:
     open-in-view: false
   sql:
     init:
-      mode: never
+      mode: always
       schema-locations: classpath:init.sql
   flyway:
     enabled: false
@@ -30,6 +37,15 @@ app:
     storage-dir: /codex/knowledge
     embedding-concurrency: 6
     reindex-concurrency: 2
+  vector:
+    provider: milvus
+    milvus:
+      host: 127.0.0.1
+      port: 19530
+      collection: knowledge_chunk_coll
+      embedding-dim: 256
+      nprobe: 16
+      shards-num: 2
   upload:
     storage-dir: /codex/upload
   ai:

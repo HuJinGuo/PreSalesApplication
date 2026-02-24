@@ -32,6 +32,7 @@ public class DocumentService {
   private final SectionReuseTraceRepository sectionReuseTraceRepository;
   private final DocumentExportRepository documentExportRepository;
   private final CurrentUserService currentUserService;
+  private final SectionChunkRefService sectionChunkRefService;
 
   public DocumentService(DocumentRepository documentRepository,
                          ProjectRepository projectRepository,
@@ -41,7 +42,8 @@ public class DocumentService {
                          SectionReviewRepository sectionReviewRepository,
                          SectionReuseTraceRepository sectionReuseTraceRepository,
                          DocumentExportRepository documentExportRepository,
-                         CurrentUserService currentUserService) {
+                         CurrentUserService currentUserService,
+                         SectionChunkRefService sectionChunkRefService) {
     this.documentRepository = documentRepository;
     this.projectRepository = projectRepository;
     this.sectionRepository = sectionRepository;
@@ -51,6 +53,7 @@ public class DocumentService {
     this.sectionReuseTraceRepository = sectionReuseTraceRepository;
     this.documentExportRepository = documentExportRepository;
     this.currentUserService = currentUserService;
+    this.sectionChunkRefService = sectionChunkRefService;
   }
 
   @Transactional
@@ -103,6 +106,7 @@ public class DocumentService {
       }
       sectionAssetRepository.deleteBySectionIdIn(sectionIds);
       sectionReviewRepository.deleteBySectionIdIn(sectionIds);
+      sectionChunkRefService.deleteBySectionIds(sectionIds);
       sectionVersionRepository.deleteBySectionIdIn(sectionIds);
 
       sections.sort((a, b) -> Integer.compare(b.getLevel(), a.getLevel()));

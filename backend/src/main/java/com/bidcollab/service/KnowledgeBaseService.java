@@ -37,7 +37,6 @@ import com.bidcollab.repository.KnowledgeDocumentRepository;
 import com.bidcollab.repository.UserRepository;
 import com.bidcollab.util.DocumentTextExtractor;
 import com.bidcollab.util.TextChunker;
-import com.bidcollab.util.VectorUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityNotFoundException;
@@ -110,6 +109,7 @@ public class KnowledgeBaseService {
   private final DocumentTextExtractor textExtractor;
   private final TextChunker textChunker;
   private final AiClient aiClient;
+  private final MilvusVectorService milvusVectorService;
   private final String knowledgeStorageDir;
   private final String uploadStorageDir;
   /** Embedding 并行线程池，控制并发数避免压垮 AI API */
@@ -133,6 +133,7 @@ public class KnowledgeBaseService {
       DocumentTextExtractor textExtractor,
       TextChunker textChunker,
       AiClient aiClient,
+      MilvusVectorService milvusVectorService,
       @Value("${app.knowledge.storage-dir:/tmp/bid-knowledge-files}") String knowledgeStorageDir,
       @Value("${app.upload.storage-dir:/tmp/bid-doc-uploads}") String uploadStorageDir,
       @Qualifier("embeddingExecutor") ExecutorService embeddingExecutor,
@@ -153,6 +154,7 @@ public class KnowledgeBaseService {
     this.textExtractor = textExtractor;
     this.textChunker = textChunker;
     this.aiClient = aiClient;
+    this.milvusVectorService = milvusVectorService;
     this.knowledgeStorageDir = knowledgeStorageDir;
     this.uploadStorageDir = uploadStorageDir;
     this.embeddingExecutor = embeddingExecutor;
@@ -218,6 +220,7 @@ public class KnowledgeBaseService {
     // examPaperRepository.deleteByKnowledgeBaseId(kbId);
 
     permissionRepository.deleteByKnowledgeBaseId(kbId);
+    milvusVectorService.deleteByKnowledgeBaseId(kbId);
     documentRepository.deleteByKnowledgeBaseId(kbId);
     chunkTermRepository.deleteByKnowledgeBaseId(kbId);
     chunkRepository.deleteByKnowledgeBaseId(kbId);
@@ -350,10 +353,29 @@ public class KnowledgeBaseService {
    */
   public List<KnowledgeChunkResponse> listChunks(Long kbId) {
     Set<Long> allowedDocIds = listAccessibleDocumentIds(kbId, currentUserService.getCurrentUserId());
-    return chunkRepository.findByKnowledgeBaseId(kbId).stream()
+    List<KnowledgeChunk> chunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
         .filter(chunk -> chunk.getKnowledgeDocument() != null
             && allowedDocIds.contains(chunk.getKnowledgeDocument().getId()))
-        .map(this::toChunkResponse)
+        .collect(Collectors.toList());
+    if (chunks.isEmpty()) {
+      return List.of();
+    }
+    List<Long> chunkIds = chunks.stream().map(KnowledgeChunk::getId).toList();
+    Map<Long, List<String>> keywordMap = chunkTermRepository
+        .findByKnowledgeBaseIdAndTermTypeAndKnowledgeChunkIdIn(kbId, "KEYWORD", chunkIds).stream()
+        .collect(Collectors.groupingBy(
+            term -> term.getKnowledgeChunk().getId(),
+            Collectors.collectingAndThen(Collectors.toList(), list -> list.stream()
+                .sorted((a, b) -> Integer.compare(
+                    b.getFrequency() == null ? 0 : b.getFrequency(),
+                    a.getFrequency() == null ? 0 : a.getFrequency()))
+                .map(KnowledgeChunkTerm::getTermName)
+                .filter(s -> s != null && !s.isBlank())
+                .distinct()
+                .limit(12)
+                .collect(Collectors.toList()))));
+    return chunks.stream()
+        .map(chunk -> toChunkResponse(chunk, keywordMap.getOrDefault(chunk.getId(), List.of())))
         .collect(Collectors.toList());
   }
 
@@ -371,7 +393,14 @@ public class KnowledgeBaseService {
    * @return 搜索结果列表，按相关度排序
    */
   public List<KnowledgeSearchResult> search(Long kbId, KnowledgeSearchRequest request) {
-    Long userId = currentUserService.getCurrentUserId();
+    return searchByUser(kbId, request, currentUserService.getCurrentUserId());
+  }
+
+  public List<KnowledgeSearchResult> searchAsUser(Long kbId, KnowledgeSearchRequest request, Long userId) {
+    return searchByUser(kbId, request, userId);
+  }
+
+  private List<KnowledgeSearchResult> searchByUser(Long kbId, KnowledgeSearchRequest request, Long userId) {
     // 权限前置过滤：后续向量计算只在允许文档范围内进行。
     Set<Long> allowedDocIds = listAccessibleDocumentIds(kbId, userId);
 
@@ -391,19 +420,29 @@ public class KnowledgeBaseService {
         : request.getCandidateTopK();
     double minScore = request.getMinScore() == null ? 0.0 : request.getMinScore();
 
-    List<KnowledgeChunk> allChunks = chunkRepository.findByKnowledgeBaseId(kbId).stream()
+    List<MilvusVectorService.SearchHit> milvusHits = milvusVectorService.search(
+        kbId, allowedDocIds, queryVector, candidateTopK);
+    if (milvusHits.isEmpty()) {
+      return List.of();
+    }
+    Map<Long, Double> scoreByChunkId = milvusHits.stream()
+        .collect(Collectors.toMap(
+            MilvusVectorService.SearchHit::getChunkId,
+            MilvusVectorService.SearchHit::getScore,
+            (a, b) -> a,
+            LinkedHashMap::new));
+    List<Long> chunkIds = new ArrayList<>(scoreByChunkId.keySet());
+    Map<Long, KnowledgeChunk> chunkById = chunkRepository.findAllById(chunkIds).stream()
         .filter(chunk -> chunk.getKnowledgeDocument() != null
             && allowedDocIds.contains(chunk.getKnowledgeDocument().getId()))
-        .collect(Collectors.toList());
-    List<KnowledgeChunk> sourceChunks = applyRetryPrefilterIfNeeded(
-        allChunks, query, queryTerms, minScore, Boolean.TRUE.equals(request.getRerank()));
+        .collect(Collectors.toMap(KnowledgeChunk::getId, c -> c));
 
-    List<KnowledgeSearchResult> candidates = sourceChunks.stream()
+    List<KnowledgeSearchResult> candidates = chunkIds.stream()
+        .map(chunkById::get)
+        .filter(c -> c != null)
         .map(chunk -> {
-          List<Double> vec = VectorUtil.fromJson(chunk.getEmbeddingJson());
-          double vectorScore = VectorUtil.cosine(queryVector, vec);
+          double vectorScore = scoreByChunkId.getOrDefault(chunk.getId(), 0D);
           double lexicalScore = lexicalScore(query, queryTerms, chunk.getContent());
-          // 混合打分：向量召回 + 关键词匹配，降低因 embedding 异常导致的漏召回
           double score = (vectorScore * 0.8) + (lexicalScore * 0.2);
           return KnowledgeSearchResult.builder()
               .chunkId(chunk.getId())
@@ -427,51 +466,7 @@ public class KnowledgeBaseService {
       return finalResult;
     }
 
-    // 兜底：纯关键词召回（不使用 minScore），避免“知识库明明有内容却返回空”
-    return sourceChunks.stream()
-        .filter(chunk -> chunk.getKnowledgeDocument() != null
-            && allowedDocIds.contains(chunk.getKnowledgeDocument().getId()))
-        .map(chunk -> KnowledgeSearchResult.builder()
-            .chunkId(chunk.getId())
-            .documentId(chunk.getKnowledgeDocument().getId())
-            .content(chunk.getContent())
-            .score(lexicalScore(query, queryTerms, chunk.getContent()))
-            .build())
-        .filter(r -> r.getScore() > 0)
-        .sorted(Comparator.comparingDouble(KnowledgeSearchResult::getScore).reversed())
-        .limit(topK)
-        .collect(Collectors.toList());
-  }
-
-  /**
-   * 仅在“降阈值重试”场景做关键词预筛，避免二次检索再做一次全量向量计算。
-   */
-  private List<KnowledgeChunk> applyRetryPrefilterIfNeeded(List<KnowledgeChunk> chunks, String query,
-      List<String> queryTerms, double minScore, boolean rerank) {
-    if (chunks.isEmpty()) {
-      return chunks;
-    }
-    // 只在低阈值 + 关闭重排（即兜底重试）时启用预筛
-    if (minScore > 0.0001 || rerank) {
-      return chunks;
-    }
-    String q = query == null ? "" : query.toLowerCase();
-    List<KnowledgeChunk> filtered = chunks.stream()
-        .filter(chunk -> {
-          String c = chunk.getContent() == null ? "" : chunk.getContent().toLowerCase();
-          if (!q.isBlank() && c.contains(q)) {
-            return true;
-          }
-          for (String term : queryTerms) {
-            if (c.contains(term)) {
-              return true;
-            }
-          }
-          return false;
-        })
-        .limit(600) // 控制重试阶段计算规模
-        .collect(Collectors.toList());
-    return filtered.isEmpty() ? chunks : filtered;
+    return List.of();
   }
 
   private List<String> tokenizeQuery(String query) {
@@ -1024,6 +1019,7 @@ public class KnowledgeBaseService {
    */
   private void reindexDocument(KnowledgeDocument doc) {
     // 删除旧索引，避免历史脏块影响召回质量。
+    milvusVectorService.deleteByDocumentId(doc.getId());
     chunkTermRepository.deleteByKnowledgeDocumentId(doc.getId());
     chunkRepository.deleteByKnowledgeDocumentId(doc.getId());
     // 章节感知切分优先保留“同章节语义连贯性”。
@@ -1051,6 +1047,7 @@ public class KnowledgeBaseService {
 
     // 按原始顺序收集结果并持久化；同时缓存关键词/实体，供图谱直接读取，避免在线重复抽取。
     List<KnowledgeChunkTerm> terms = new ArrayList<>();
+    List<MilvusVectorService.ChunkVectorRecord> vectorRecords = new ArrayList<>();
     for (int i = 0; i < chunks.size(); i++) {
       List<Double> embedding = futures[i].join();
       KnowledgeChunk chunk = KnowledgeChunk.builder()
@@ -1058,10 +1055,11 @@ public class KnowledgeBaseService {
           .knowledgeDocument(doc)
           .chunkIndex(i + 1)
           .content(chunks.get(i))
-          .embeddingJson(VectorUtil.toJson(embedding))
+          .embeddingJson("[]")
           .embeddingDim(embedding.size())
           .build();
       chunkRepository.save(chunk);
+      vectorRecords.add(new MilvusVectorService.ChunkVectorRecord(chunk.getId(), chunk.getChunkIndex(), embedding));
 
       Map<String, Integer> keywordFreq = extractKeywordFrequency(chunks.get(i), 10);
       for (Map.Entry<String, Integer> e : keywordFreq.entrySet()) {
@@ -1091,6 +1089,9 @@ public class KnowledgeBaseService {
     }
     if (!terms.isEmpty()) {
       chunkTermRepository.saveAll(terms);
+    }
+    if (!vectorRecords.isEmpty()) {
+      milvusVectorService.upsert(doc.getKnowledgeBase().getId(), doc.getId(), vectorRecords);
     }
   }
 
@@ -1818,7 +1819,7 @@ public class KnowledgeBaseService {
   }
 
   /** 将知识分块实体转换为响应 DTO。 */
-  private KnowledgeChunkResponse toChunkResponse(KnowledgeChunk chunk) {
+  private KnowledgeChunkResponse toChunkResponse(KnowledgeChunk chunk, List<String> keywords) {
     return KnowledgeChunkResponse.builder()
         .id(chunk.getId())
         .knowledgeBaseId(chunk.getKnowledgeBase().getId())
@@ -1826,6 +1827,7 @@ public class KnowledgeBaseService {
         .chunkIndex(chunk.getChunkIndex())
         .content(chunk.getContent())
         .embeddingDim(chunk.getEmbeddingDim())
+        .keywords(keywords)
         .build();
   }
 

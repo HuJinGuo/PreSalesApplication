@@ -14,5 +14,6 @@ public class AiTaskResponse {
   private Long resultVersionId;
   private AiTaskStatus status;
   private String errorMessage;
+  private String response;
   private Instant createdAt;
 }

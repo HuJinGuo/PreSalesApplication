@@ -62,4 +62,26 @@ public interface KnowledgeChunkTermRepository extends JpaRepository<KnowledgeChu
       @Param("termType") String termType,
       @Param("termKey") String termKey,
       @Param("documentIds") Collection<Long> documentIds);
+
+  @Query("""
+      select t.knowledgeDocument.id as knowledgeDocumentId,
+             t.knowledgeChunk.id as knowledgeChunkId,
+             t.termType as termType,
+             t.termKey as termKey,
+             t.termName as termName,
+             t.frequency as frequency
+      from KnowledgeChunkTerm t
+      where t.knowledgeBase.id = :knowledgeBaseId
+        and t.termType = :termType
+        and t.knowledgeChunk.id in :chunkIds
+      """)
+  List<TermStatRow> findStatsByKnowledgeBaseIdAndTermTypeAndKnowledgeChunkIdIn(
+      @Param("knowledgeBaseId") Long knowledgeBaseId,
+      @Param("termType") String termType,
+      @Param("chunkIds") Collection<Long> chunkIds);
+
+  List<KnowledgeChunkTerm> findByKnowledgeBaseIdAndTermTypeAndKnowledgeChunkIdIn(
+      Long knowledgeBaseId,
+      String termType,
+      Collection<Long> chunkIds);
 }

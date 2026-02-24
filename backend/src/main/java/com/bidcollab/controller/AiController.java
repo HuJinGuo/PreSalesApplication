@@ -2,6 +2,7 @@ package com.bidcollab.controller;
 
 import com.bidcollab.dto.AiAssistantAskRequest;
 import com.bidcollab.dto.AiAssistantAskResponse;
+import com.bidcollab.dto.AiDocumentAutoWriteRequest;
 import com.bidcollab.dto.AiRewriteRequest;
 import com.bidcollab.dto.AiTaskResponse;
 import com.bidcollab.service.AiService;
@@ -30,6 +31,11 @@ public class AiController {
   @PostMapping("/ask")
   public AiAssistantAskResponse ask(@Valid @RequestBody AiAssistantAskRequest request) {
     return aiService.ask(request);
+  }
+
+  @PostMapping("/document-auto-write")
+  public AiTaskResponse autoWriteDocument(@Valid @RequestBody AiDocumentAutoWriteRequest request) {
+    return aiService.autoWriteDocument(request);
   }
 
   @GetMapping("/tasks/{taskId}")

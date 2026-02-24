@@ -2,6 +2,7 @@ package com.bidcollab.service;
 
 import com.bidcollab.dto.SectionCreateRequest;
 import com.bidcollab.dto.SectionMoveRequest;
+import com.bidcollab.dto.SectionChunkRefResponse;
 import com.bidcollab.dto.SectionTreeNode;
 import com.bidcollab.dto.SectionUpdateRequest;
 import com.bidcollab.dto.SectionVersionCreateRequest;
@@ -30,15 +31,18 @@ public class SectionService {
   private final SectionVersionRepository sectionVersionRepository;
   private final DocumentRepository documentRepository;
   private final CurrentUserService currentUserService;
+  private final SectionChunkRefService sectionChunkRefService;
 
   public SectionService(SectionRepository sectionRepository,
       SectionVersionRepository sectionVersionRepository,
       DocumentRepository documentRepository,
-      CurrentUserService currentUserService) {
+      CurrentUserService currentUserService,
+      SectionChunkRefService sectionChunkRefService) {
     this.sectionRepository = sectionRepository;
     this.sectionVersionRepository = sectionVersionRepository;
     this.documentRepository = documentRepository;
     this.currentUserService = currentUserService;
+    this.sectionChunkRefService = sectionChunkRefService;
   }
 
   @Transactional(readOnly = true)
@@ -106,6 +110,7 @@ public class SectionService {
   public void delete(Long sectionId) {
     Section section = sectionRepository.findById(sectionId).orElseThrow(EntityNotFoundException::new);
     deleteChildren(section);
+    sectionChunkRefService.deleteBySectionId(section.getId());
     sectionRepository.delete(section);
   }
 
@@ -113,6 +118,7 @@ public class SectionService {
     List<Section> children = sectionRepository.findByParentIdOrderBySortIndexAsc(section.getId());
     for (Section child : children) {
       deleteChildren(child);
+      sectionChunkRefService.deleteBySectionId(child.getId());
       sectionRepository.delete(child);
     }
   }
@@ -181,6 +187,11 @@ public class SectionService {
     section.setCurrentVersion(version);
     sectionRepository.save(section);
     return toVersionResponse(version);
+  }
+
+  @Transactional(readOnly = true)
+  public List<SectionChunkRefResponse> listChunkRefs(Long sectionId) {
+    return sectionChunkRefService.listBySection(sectionId);
   }
 
   @Transactional(readOnly = true)

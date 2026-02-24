@@ -139,7 +139,7 @@ public class DocumentTextExtractor {
           for (XWPFRun run : p.getRuns()) {
             String text = run.text();
             if (text != null && !text.isBlank()) {
-              sb.append(text);
+              appendRunText(sb, text);
             }
             for (XWPFPicture pic : run.getEmbeddedPictures()) {
               XWPFPictureData data = pic.getPictureData();
@@ -196,7 +196,7 @@ public class DocumentTextExtractor {
       for (IBodyElement element : doc.getBodyElements()) {
         if (element instanceof XWPFParagraph) {
           XWPFParagraph p = (XWPFParagraph) element;
-          String text = p.getText();
+          String text = paragraphTextWithRunSpacing(p);
           if (text != null && !text.isBlank()) {
             sb.append(text.trim()).append('\n');
           }
@@ -431,5 +431,44 @@ public class DocumentTextExtractor {
       return normalized.substring(0, 2_000_000);
     }
     return normalized;
+  }
+
+  private String paragraphTextWithRunSpacing(XWPFParagraph paragraph) {
+    if (paragraph == null) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    for (XWPFRun run : paragraph.getRuns()) {
+      String text = run.text();
+      if (text == null || text.isBlank()) {
+        continue;
+      }
+      appendRunText(sb, text);
+    }
+    return sb.toString();
+  }
+
+  private void appendRunText(StringBuilder sb, String fragment) {
+    String text = fragment == null ? "" : fragment.trim();
+    if (text.isEmpty()) {
+      return;
+    }
+    if (sb.length() > 0) {
+      char prev = sb.charAt(sb.length() - 1);
+      char next = text.charAt(0);
+      if (needsBoundarySpace(prev, next)) {
+        sb.append(' ');
+      }
+    }
+    sb.append(text);
+  }
+
+  private boolean needsBoundarySpace(char prev, char next) {
+    if (Character.isWhitespace(prev) || Character.isWhitespace(next)) {
+      return false;
+    }
+    boolean prevWord = Character.isLetterOrDigit(prev) || prev == '_';
+    boolean nextWord = Character.isLetterOrDigit(next) || next == '_';
+    return prevWord && nextWord;
   }
 }

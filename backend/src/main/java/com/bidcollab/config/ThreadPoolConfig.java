@@ -52,4 +52,15 @@ public class ThreadPoolConfig {
             return t;
         });
     }
+
+    @Bean(name = "aiDocumentExecutor", destroyMethod = "shutdown")
+    public ExecutorService aiDocumentExecutor(
+            @Value("${app.ai.document-auto-write-concurrency:2}") int concurrency) {
+        int poolSize = Math.max(1, concurrency);
+        return Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "ai-document-worker");
+            t.setDaemon(true);
+            return t;
+        });
+    }
 }

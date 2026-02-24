@@ -61,6 +61,9 @@ export const api = {
   createVersion(sectionId: number, data: any) {
     return http.post(`/sections/${sectionId}/versions`, data)
   },
+  listSectionChunkRefs(sectionId: number) {
+    return http.get(`/sections/${sectionId}/chunk-refs`)
+  },
   listSectionTemplates() {
     return http.get('/section-templates')
   },
@@ -99,6 +102,9 @@ export const api = {
   },
   aiAsk(data: any) {
     return http.post('/ai/ask', data)
+  },
+  aiAutoWriteDocument(data: any) {
+    return http.post('/ai/document-auto-write', data)
   },
   getAiTask(id: number) {
     return http.get(`/ai/tasks/${id}`)

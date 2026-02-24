@@ -100,6 +100,7 @@
         <div class="footer-actions">
           <el-button @click="openAssetDialog">沉淀为资产</el-button>
           <el-button type="success" @click="aiRewrite">AI改写</el-button>
+          <el-button type="primary" @click="openAutoWriteDialog">AI自动编写全文</el-button>
           <el-button type="warning" @click="submitReview">提交审核</el-button>
         </div>
       </div>
@@ -149,6 +150,28 @@
                   <el-input :value="imageMarkerPreview" readonly />
                 </el-form-item>
               </el-form>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane label="引用片段" name="citation">
+            <div class="image-panel">
+              <div class="image-list-title">正文分段引用（{{ citationRows.length }} 段）</div>
+              <el-empty v-if="!citationRows.length" description="当前章节暂无引用片段" :image-size="68" />
+              <div v-else class="citation-card-list">
+                <div v-for="row in citationRows" :key="row.paragraphIndex" class="citation-card">
+                  <div class="citation-card-head">
+                    <span class="citation-index">片段 {{ row.paragraphIndex }}</span>
+                    <el-space wrap>
+                      <el-tag v-for="id in row.chunkIds" :key="`${row.paragraphIndex}-${id}`" size="small" type="info">
+                        Chunk #{{ id }}
+                      </el-tag>
+                    </el-space>
+                  </div>
+                  <div class="citation-content">{{ row.context || '（无摘要）' }}</div>
+                </div>
+              </div>
+              <div class="editor-hint" style="margin-top: 8px;">
+                引用来自后端持久化表 <code>section_chunk_ref</code>，不依赖正文中的标记文本。
+              </div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -228,6 +251,31 @@
         <el-button type="primary" @click="saveAsTemplate">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showAutoWriteDialog" title="AI自动编写全文" width="560px">
+      <el-form :model="autoWriteForm" label-width="120px">
+        <el-form-item label="知识库">
+          <el-select v-model="autoWriteForm.knowledgeBaseId" style="width: 100%" clearable placeholder="可不选（仅按结构生成）">
+            <el-option v-for="kb in autoWriteKnowledgeBases" :key="kb.id" :label="kb.name" :value="kb.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="覆盖已有内容">
+          <el-switch v-model="autoWriteForm.overwriteExisting" />
+        </el-form-item>
+        <el-form-item label="项目补充参数">
+          <el-input
+            v-model="autoWriteForm.projectParams"
+            type="textarea"
+            :rows="5"
+            placeholder="可填写项目背景、客户要求、交付边界等（JSON/文本均可）"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showAutoWriteDialog = false">取消</el-button>
+        <el-button type="primary" :loading="autoWriting" @click="startAutoWrite">开始生成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -240,6 +288,8 @@ import { Editor, Toolbar } from '@wangeditor/editor-for-vue'
 import type { IDomEditor, IEditorConfig } from '@wangeditor/editor'
 import { SlateEditor, SlateTransforms, DomEditor } from '@wangeditor/editor'
 import { api } from '@/api'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 type ImageMeta = {
   index: number
@@ -248,6 +298,11 @@ type ImageMeta = {
   width: number
   align: 'left' | 'center' | 'right'
   caption: string
+}
+type CitationRow = {
+  paragraphIndex: number
+  chunkIds: string[]
+  context: string
 }
 
 const route = useRoute()
@@ -263,9 +318,14 @@ const showCreateSection = ref(false)
 const showAssetDialog = ref(false)
 const showApplyTemplate = ref(false)
 const showSaveTemplate = ref(false)
+const showAutoWriteDialog = ref(false)
+const autoWriting = ref(false)
+const autoWriteKnowledgeBases = ref<any[]>([])
+const autoWriteTaskTimer = ref<number | null>(null)
 const templates = ref<any[]>([])
-const rightTab = ref<'image'>('image')
+const rightTab = ref<'image' | 'citation'>('image')
 const images = ref<ImageMeta[]>([])
+const citationRows = ref<CitationRow[]>([])
 const selectedImageIndex = ref(-1)
 const imageForm = reactive({
   src: '',
@@ -333,6 +393,11 @@ const assetForm = reactive({
 })
 const templateApplyForm = reactive({ templateId: undefined as number | undefined })
 const templateSaveForm = reactive({ name: '', description: '' })
+const autoWriteForm = reactive({
+  knowledgeBaseId: undefined as number | undefined,
+  projectParams: '',
+  overwriteExisting: true
+})
 const centerRenameEditing = ref(false)
 const centerRenameTitle = ref('')
 const centerRenameInputRef = ref()
@@ -340,9 +405,51 @@ const centerRenameInputRef = ref()
 const normalizeToHtml = (raw: string) => {
   if (!raw) return ''
   const trimmed = raw.trim()
-  if (/<[a-z][\s\S]*>/i.test(trimmed)) return trimmed
+  if (/<[a-z][\s\S]*>/i.test(trimmed)) {
+    if (trimmed.includes('&lt;table') || trimmed.includes('&lt;tr') || trimmed.includes('&lt;td')) {
+      const textarea = window.document.createElement('textarea')
+      textarea.innerHTML = trimmed
+      return textarea.value
+    }
+    return trimmed
+  }
+  const markdownHtml = marked.parse(trimmed, { gfm: true, breaks: true, async: false }) as string
+  const cleaned = DOMPurify.sanitize(markdownHtml)
+  if (cleaned && cleaned.trim()) {
+    return cleaned
+  }
   const escaped = trimmed.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return escaped.split('\n').map(line => `<p>${line || '<br>'}</p>`).join('')
+}
+
+const loadCitationRows = async (sectionId?: number) => {
+  if (!sectionId) {
+    citationRows.value = []
+    return
+  }
+  try {
+    const { data } = await api.listSectionChunkRefs(sectionId)
+    const grouped = new Map<number, CitationRow>()
+    for (const item of (data || [])) {
+      const paragraphIndex = Number(item.paragraphIndex || 0)
+      if (!paragraphIndex) continue
+      const chunkId = String(item.chunkId)
+      const row = grouped.get(paragraphIndex)
+      if (!row) {
+        grouped.set(paragraphIndex, {
+          paragraphIndex,
+          chunkIds: [chunkId],
+          context: item.quoteText || ''
+        })
+      } else {
+        if (!row.chunkIds.includes(chunkId)) row.chunkIds.push(chunkId)
+        if (!row.context && item.quoteText) row.context = item.quoteText
+      }
+    }
+    citationRows.value = Array.from(grouped.values()).sort((a, b) => a.paragraphIndex - b.paragraphIndex)
+  } catch {
+    citationRows.value = []
+  }
 }
 // ─── 图片管理：基于 Slate 模型的统一读写，解决 DOM 与数据不同步问题 ───
 
@@ -523,6 +630,7 @@ const persistCurrentSection = async (summary: string, showMessage: boolean) => {
     lastSavedContent.value = content.value
     dirty.value = false
     lastSavedAt.value = Date.now()
+    await loadCitationRows(currentSection.value.id)
     if (showMessage) ElMessage.success('已保存')
   } catch (err: any) {
     if (showMessage) {
@@ -561,12 +669,14 @@ const handleSelect = async (node: any) => {
   if (node.currentVersionId) {
     const v = await api.getVersion(node.id, node.currentVersionId)
     setProgrammaticContent(normalizeToHtml(v.data.content || ''))
+    await loadCitationRows(node.id)
     if (v.data.createdAt) {
       lastSavedAt.value = new Date(v.data.createdAt).getTime()
     }
   } else {
     setProgrammaticContent('')
     lastSavedAt.value = null
+    citationRows.value = []
   }
 }
 const findNodeAndSiblings = (nodeId: number, nodes: any[] = sectionTree.value, parent: any = null): { node: any; siblings: any[]; parent: any | null } | null => {
@@ -662,6 +772,7 @@ const deleteSectionNode = async (node: any) => {
       content.value = ''
       dirty.value = false
       lastSavedContent.value = ''
+      citationRows.value = []
     }
     ElMessage.success('章节已删除')
     await load()
@@ -729,6 +840,65 @@ const aiRewrite = async () => {
     await handleSelect(currentSection.value)
   } catch {
     ElMessage.error('AI改写失败')
+  }
+}
+const openAutoWriteDialog = async () => {
+  showAutoWriteDialog.value = true
+  if (!autoWriteKnowledgeBases.value.length) {
+    const { data } = await api.listKnowledgeBases()
+    autoWriteKnowledgeBases.value = data || []
+  }
+  autoWriteForm.projectParams = JSON.stringify({ projectId: document.value?.projectId, documentId: document.value?.id })
+}
+const clearAutoWriteTimer = () => {
+  if (autoWriteTaskTimer.value !== null) {
+    window.clearInterval(autoWriteTaskTimer.value)
+    autoWriteTaskTimer.value = null
+  }
+}
+const startAutoWrite = async () => {
+  if (!document.value?.id) return
+  if (dirty.value) {
+    ElMessage.warning('请先保存当前章节，再执行全文自动编写')
+    return
+  }
+  try {
+    autoWriting.value = true
+    const { data } = await api.aiAutoWriteDocument({
+      documentId: document.value.id,
+      knowledgeBaseId: autoWriteForm.knowledgeBaseId,
+      projectParams: autoWriteForm.projectParams,
+      overwriteExisting: autoWriteForm.overwriteExisting
+    })
+    const taskId = data?.id
+    if (!taskId) {
+      ElMessage.error('任务创建失败')
+      return
+    }
+    ElMessage.success(`已启动自动编写任务 #${taskId}`)
+    showAutoWriteDialog.value = false
+    clearAutoWriteTimer()
+    autoWriteTaskTimer.value = window.setInterval(async () => {
+      try {
+        const taskRes = await api.getAiTask(taskId)
+        const status = taskRes.data?.status
+        if (status === 'RUNNING') return
+        clearAutoWriteTimer()
+        autoWriting.value = false
+        if (status === 'SUCCESS') {
+          ElMessage.success('AI 自动编写完成')
+        } else {
+          ElMessage.error(taskRes.data?.errorMessage || 'AI 自动编写失败')
+        }
+        await load()
+      } catch (e) {
+        clearAutoWriteTimer()
+        autoWriting.value = false
+      }
+    }, 2500)
+  } catch {
+    autoWriting.value = false
+    ElMessage.error('启动自动编写失败')
   }
 }
 const submitReview = async () => {
@@ -822,6 +992,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (imageSyncTimer) window.clearTimeout(imageSyncTimer)
   if (applyTimer) window.clearTimeout(applyTimer)
+  clearAutoWriteTimer()
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('keydown', handleEditorShortcut)
   editorRef.value?.destroy()
@@ -1037,6 +1208,43 @@ onBeforeUnmount(() => {
   margin-top: 6px;
   border-top: 1px dashed #dbe3ef;
   padding-top: 10px;
+}
+
+.citation-card-list {
+  max-height: 520px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.citation-card {
+  border: 1px solid #dbe5f2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fbfdff;
+}
+
+.citation-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.citation-index {
+  font-size: 12px;
+  color: #6b7a90;
+}
+
+.citation-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #24364f;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .header .header-title,
