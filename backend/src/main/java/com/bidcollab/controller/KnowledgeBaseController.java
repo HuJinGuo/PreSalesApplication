@@ -69,6 +69,11 @@ public class KnowledgeBaseController {
     return service.listDocuments(kbId);
   }
 
+  @DeleteMapping("/{kbId}/documents/{documentId}")
+  public void deleteDocument(@PathVariable("kbId") Long kbId, @PathVariable("documentId") Long documentId) {
+    service.deleteDocument(kbId, documentId);
+  }
+
   @PostMapping("/{kbId}/documents/{documentId}/visibility")
   public KnowledgeDocumentResponse updateVisibility(@PathVariable("kbId") Long kbId,
                                                     @PathVariable("documentId") Long documentId,

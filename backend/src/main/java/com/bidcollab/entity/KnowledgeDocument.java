@@ -59,6 +59,9 @@ public class KnowledgeDocument extends BaseEntity {
   @Column(name = "index_message", length = 1000)
   private String indexMessage;
 
+  @Column(name = "index_progress", nullable = false)
+  private Integer indexProgress;
+
   @Column(name = "indexed_at")
   private Instant indexedAt;
 

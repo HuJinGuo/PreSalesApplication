@@ -106,6 +106,12 @@ export const api = {
   aiAutoWriteDocument(data: any) {
     return http.post('/ai/document-auto-write', data)
   },
+  getAiTokenUsageDaily(params?: any) {
+    return http.get('/ai/token-usage/daily', { params })
+  },
+  getAiTokenUsageRecords(params?: any) {
+    return http.get('/ai/token-usage/records', { params })
+  },
   getAiTask(id: number) {
     return http.get(`/ai/tasks/${id}`)
   },
@@ -196,6 +202,9 @@ export const api = {
   },
   listKnowledgeDocuments(kbId: number) {
     return http.get(`/knowledge-bases/${kbId}/documents`)
+  },
+  deleteKnowledgeDocument(kbId: number, documentId: number) {
+    return http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`)
   },
   listKnowledgeChunks(kbId: number) {
     return http.get(`/knowledge-bases/${kbId}/chunks`)

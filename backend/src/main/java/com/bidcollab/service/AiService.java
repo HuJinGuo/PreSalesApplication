@@ -11,74 +11,62 @@ import com.bidcollab.dto.KnowledgeSearchResult;
 import com.bidcollab.dto.AiTaskResponse;
 import com.bidcollab.dto.SectionVersionCreateRequest;
 import com.bidcollab.entity.AiTask;
-import com.bidcollab.entity.Document;
 import com.bidcollab.entity.KnowledgeBase;
 import com.bidcollab.entity.KnowledgeDocument;
 import com.bidcollab.entity.Section;
+import com.bidcollab.entity.SectionChunkRef;
 import com.bidcollab.entity.SectionVersion;
 import com.bidcollab.enums.AiTaskStatus;
 import com.bidcollab.enums.SectionSourceType;
 import com.bidcollab.repository.AiTaskRepository;
-import com.bidcollab.repository.DocumentRepository;
 import com.bidcollab.repository.KnowledgeBaseRepository;
 import com.bidcollab.repository.KnowledgeDocumentRepository;
 import com.bidcollab.repository.SectionRepository;
+import com.bidcollab.repository.SectionChunkRefRepository;
 import com.bidcollab.repository.SectionVersionRepository;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityNotFoundException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AiService {
-  private static final ObjectMapper MAPPER = new ObjectMapper();
   private final AiTaskRepository aiTaskRepository;
-  private final DocumentRepository documentRepository;
   private final SectionRepository sectionRepository;
   private final SectionVersionRepository sectionVersionRepository;
+  private final SectionChunkRefRepository sectionChunkRefRepository;
   private final KnowledgeBaseRepository knowledgeBaseRepository;
   private final KnowledgeDocumentRepository knowledgeDocumentRepository;
   private final KnowledgeBaseService knowledgeBaseService;
-  private final SectionChunkRefService sectionChunkRefService;
+  private final DocumentAutoWriteService documentAutoWriteService;
   private final AiClient aiClient;
   private final CurrentUserService currentUserService;
-  private final ExecutorService aiDocumentExecutor;
 
   public AiService(AiTaskRepository aiTaskRepository,
-      DocumentRepository documentRepository,
       SectionRepository sectionRepository,
       SectionVersionRepository sectionVersionRepository,
+      SectionChunkRefRepository sectionChunkRefRepository,
       KnowledgeBaseRepository knowledgeBaseRepository,
       KnowledgeDocumentRepository knowledgeDocumentRepository,
       KnowledgeBaseService knowledgeBaseService,
-      SectionChunkRefService sectionChunkRefService,
+      DocumentAutoWriteService documentAutoWriteService,
       AiClient aiClient,
-      CurrentUserService currentUserService,
-      @Qualifier("aiDocumentExecutor") ExecutorService aiDocumentExecutor) {
+      CurrentUserService currentUserService) {
     this.aiTaskRepository = aiTaskRepository;
-    this.documentRepository = documentRepository;
     this.sectionRepository = sectionRepository;
     this.sectionVersionRepository = sectionVersionRepository;
+    this.sectionChunkRefRepository = sectionChunkRefRepository;
     this.knowledgeBaseRepository = knowledgeBaseRepository;
     this.knowledgeDocumentRepository = knowledgeDocumentRepository;
     this.knowledgeBaseService = knowledgeBaseService;
-    this.sectionChunkRefService = sectionChunkRefService;
+    this.documentAutoWriteService = documentAutoWriteService;
     this.aiClient = aiClient;
     this.currentUserService = currentUserService;
-    this.aiDocumentExecutor = aiDocumentExecutor;
   }
 
   @Transactional
@@ -98,9 +86,24 @@ public class AiService {
     aiTaskRepository.save(task);
 
     try {
-      String systemPrompt = "你是售前文档助手，基于输入内容和项目参数改写美化，不得编造事实。";
-      String userPrompt = "【项目参数】\n" + request.getProjectParams() + "\n\n【原章节】\n" + sourceVersion.getContent()
-          + "\n\n请输出改写后的章节正文。";
+      List<SectionChunkRef> refs = sectionChunkRefRepository.findBySectionIdOrderByParagraphIndexAscIdAsc(section.getId());
+      String citationContext = buildCitationContext(refs);
+      boolean hasCitations = !citationContext.isBlank();
+      String systemPrompt = """
+          你是售前文档助手。
+          请仅围绕“当前章节标题”写作，并优先使用“引用片段”中的信息。
+          要求：
+          1) 使用中文输出；
+          2) 保持专业、准确、简洁，不要编造事实；
+          3) 不要写跨章节内容，不要新增子章节标题；
+          4) 若引用片段不足，仅做最小必要补全，明确表述为“基于现有信息”。
+          5) 输出为可直接落库的 HTML 片段（允许 p,strong,em,u,span,br,ul,ol,li,table,thead,tbody,tr,th,td,blockquote）。
+          """;
+      String userPrompt = "【章节标题】\n" + section.getTitle()
+          + "\n\n【项目参数】\n" + request.getProjectParams()
+          + "\n\n【引用片段】\n" + (hasCitations ? citationContext : "(当前章节暂无引用片段)")
+          + "\n\n【原章节（仅兜底参考）】\n" + sourceVersion.getContent()
+          + "\n\n请输出改写后的章节正文（HTML）。";
       String output = aiClient.chat(systemPrompt, userPrompt);
       SectionVersionCreateRequest versionRequest = new SectionVersionCreateRequest();
       versionRequest.setContent(output);
@@ -129,68 +132,40 @@ public class AiService {
     return toResponse(task);
   }
 
-  @Transactional
-  public AiTaskResponse autoWriteDocument(AiDocumentAutoWriteRequest request) {
-    Document document = documentRepository.findById(request.getDocumentId()).orElseThrow(EntityNotFoundException::new);
-    Long operatorId = currentUserService.getCurrentUserId();
-    AiTask task = AiTask.builder()
-        .sectionId(null)
-        .sourceVersionId(null)
-        .prompt(buildAutoWritePromptPayload(request))
-        .status(AiTaskStatus.RUNNING)
-        .startedAt(Instant.now())
-        .createdBy(operatorId)
-        .response("{\"status\":\"RUNNING\",\"total\":0,\"success\":0,\"failed\":0}")
-        .build();
-    aiTaskRepository.save(task);
-    aiDocumentExecutor.submit(() -> runAutoWrite(task.getId(), document.getId(), request, operatorId));
-    return toResponse(task);
+  private String buildCitationContext(List<SectionChunkRef> refs) {
+    if (refs == null || refs.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    int count = 0;
+    for (SectionChunkRef ref : refs) {
+      if (ref == null || ref.getChunkId() == null) {
+        continue;
+      }
+      String quote = ref.getQuoteText() == null ? "" : ref.getQuoteText().trim();
+      if (quote.isBlank()) {
+        continue;
+      }
+      if (quote.length() > 1200) {
+        quote = quote.substring(0, 1200);
+      }
+      sb.append("- [chunk#")
+          .append(ref.getChunkId())
+          .append("] ")
+          .append(quote)
+          .append("\n");
+      count++;
+      if (count >= 10) {
+        break;
+      }
+    }
+    return sb.toString().trim();
   }
 
   @Transactional
-  protected void runAutoWrite(Long taskId, Long documentId, AiDocumentAutoWriteRequest request, Long operatorId) {
-    AiTask task = aiTaskRepository.findById(taskId).orElseThrow(EntityNotFoundException::new);
-    try {
-      List<Section> sections = sectionRepository.findTreeByDocumentId(documentId);
-      List<Section> orderedSections = orderSectionsForAutoWrite(sections);
-      int total = orderedSections.size();
-      int success = 0;
-      int failed = 0;
-      List<Map<String, Object>> detail = new ArrayList<>();
-
-      for (Section section : orderedSections) {
-        try {
-          String sectionPath = buildSectionPath(section, sections);
-          String supplement = section.getCurrentVersion() == null ? "" : safe(section.getCurrentVersion().getContent());
-          DraftOutput draft = generateSectionDraft(section, sectionPath, supplement, request, operatorId);
-          persistSectionDraft(section, draft.content(), draft.hits(), operatorId, request.isOverwriteExisting(),
-              taskId);
-          success++;
-          detail.add(buildStep(section.getId(), section.getTitle(), "SUCCESS", null));
-        } catch (Exception ex) {
-          failed++;
-          detail.add(buildStep(section.getId(), section.getTitle(), "FAILED", ex.getMessage()));
-        }
-        task.setResponse(buildAutoWriteProgressPayload(total, success, failed, detail, "RUNNING"));
-        aiTaskRepository.save(task);
-      }
-
-      if (failed > 0) {
-        task.setStatus(AiTaskStatus.FAILED);
-        task.setErrorMessage("部分章节生成失败，成功 " + success + " / 总计 " + total);
-      } else {
-        task.setStatus(AiTaskStatus.SUCCESS);
-      }
-      task.setResponse(buildAutoWriteProgressPayload(total, success, failed, detail, task.getStatus().name()));
-      task.setFinishedAt(Instant.now());
-      aiTaskRepository.save(task);
-    } catch (Exception ex) {
-      task.setStatus(AiTaskStatus.FAILED);
-      task.setErrorMessage(ex.getMessage());
-      task.setFinishedAt(Instant.now());
-      task.setResponse(buildAutoWriteProgressPayload(0, 0, 0, List.of(), "FAILED"));
-      aiTaskRepository.save(task);
-    }
+  public AiTaskResponse autoWriteDocument(AiDocumentAutoWriteRequest request) {
+    Long operatorId = currentUserService.getCurrentUserId();
+    return documentAutoWriteService.autoWriteDocument(request, operatorId);
   }
 
   public AiTaskResponse getTask(Long taskId) {
@@ -300,14 +275,13 @@ public class AiService {
     String answer;
     try {
       // 系统提示词：约束模型只能基于知识片段回答，不得编造
+      // 1) 不得编造片段中不存在的事实；
+      // 2) 如果信息不足，明确说"知识库暂无充分依据";
       String systemPrompt = """
-          你是售前招标文档智能助手。你需要基于"知识片段"回答。
+          你是售前文档智能助手。你可以参考"知识片段"回答。
           要求：
-          1) 不得编造片段中不存在的事实；
-          2) 如果信息不足，明确说"知识库暂无充分依据";
-          3) 回答尽量结构化、简洁，并给出可执行建议；
-          4) 使用中文。
-          5) 可以参考用户提供的数据;
+          1) 回答尽量结构化、简洁，并给出可执行建议；
+          2) 使用中文。
           """;
       // 用户提示词：包含原始问题和检索到的知识片段
       String userPrompt = "【用户问题】\n" + request.getQuery() + "\n\n【知识片段】\n" + context;
@@ -397,264 +371,6 @@ public class AiService {
     int topK = request.getTopK() == null ? 8 : request.getTopK();
     // 查询较长或期望召回较多时再重试
     return effectiveLen >= 8 || topK >= 6;
-  }
-
-  private List<Section> orderSectionsForAutoWrite(List<Section> sections) {
-    Map<Long, List<Section>> children = new HashMap<>();
-    List<Section> roots = new ArrayList<>();
-    for (Section section : sections) {
-      if (section.getParent() == null) {
-        roots.add(section);
-      } else {
-        children.computeIfAbsent(section.getParent().getId(), k -> new ArrayList<>()).add(section);
-      }
-    }
-    roots.sort(Comparator.comparing(Section::getSortIndex));
-    children.values().forEach(list -> list.sort(Comparator.comparing(Section::getSortIndex)));
-    List<Section> ordered = new ArrayList<>();
-    for (Section root : roots) {
-      traverseSection(root, children, ordered);
-    }
-    return ordered;
-  }
-
-  private void traverseSection(Section current, Map<Long, List<Section>> children, List<Section> ordered) {
-    ordered.add(current);
-    for (Section child : children.getOrDefault(current.getId(), List.of())) {
-      traverseSection(child, children, ordered);
-    }
-  }
-
-  private String buildSectionPath(Section section, List<Section> allSections) {
-    Map<Long, Section> byId = allSections.stream().collect(Collectors.toMap(Section::getId, s -> s, (a, b) -> a));
-    List<String> chain = new ArrayList<>();
-    Section cursor = section;
-    while (cursor != null) {
-      chain.add(cursor.getTitle());
-      cursor = cursor.getParent() == null ? null : byId.get(cursor.getParent().getId());
-    }
-    java.util.Collections.reverse(chain);
-    return String.join(" > ", chain);
-  }
-
-  private DraftOutput generateSectionDraft(Section section,
-      String sectionPath,
-      String supplement,
-      AiDocumentAutoWriteRequest request,
-      Long operatorId) {
-    List<KnowledgeSearchResult> hits = List.of();
-    String retrievalContext = "";
-    if (request.getKnowledgeBaseId() != null) {
-      KnowledgeSearchRequest searchRequest = new KnowledgeSearchRequest();
-      String query = sectionPath + (supplement.isBlank() ? "" : ("\n" + supplement));
-      searchRequest.setQuery(query);
-      searchRequest.setTopK(4);
-      searchRequest.setCandidateTopK(16);
-      searchRequest.setMinScore(0.12);
-      searchRequest.setRerank(true);
-      hits = knowledgeBaseService.searchAsUser(
-          request.getKnowledgeBaseId(), searchRequest, operatorId);
-      hits = filterHitsBySection(sectionPath, section.getTitle(), hits);
-      retrievalContext = hits.stream().limit(6)
-          .map(hit -> "- [chunk#" + hit.getChunkId() + "] " + normalizeHitForPrompt(hit.getContent()))
-          .collect(Collectors.joining("\n"));
-    }
-
-    String systemPrompt = """
-        你是售前文档写作助手。
-        必须围绕“章节标题”写作，保持专业、客观、结构清晰。
-        如果提供了知识片段，只能基于片段和补充信息写，不得编造。
-        不要扩展章节结构，不要输出“1.1/###”这类子章节标题，不要跨章节拼接无关主题。
-        不要在正文中输出 [chunk#123] 这类引用标记。
-        默认使用中文输出，除非术语必须保留英文。
-
-        输出要求（必须遵守）：
-        1) 只输出“正文 HTML 片段”，不要输出 markdown，不要输出 ``` 代码块，不要输出解释性前言。
-        2) 可用标签：p,strong,em,u,span,br,ul,ol,li,table,thead,tbody,tr,th,td,blockquote,h3,h4,img。
-        3) 需要强调时可使用内联样式（如 span 的 color）。
-        4) 若知识片段包含图片标记 [img ...]URL，需要在正文中转成 <img src="URL" alt="图片说明" />。
-        5) 输出必须可直接写入富文本编辑器。
-        """;
-    String userPrompt = """
-        【章节路径】
-        %s
-
-        【章节标题】
-        %s
-
-        【项目参数】
-        %s
-
-        【补充信息】
-        %s
-
-        【知识片段】
-        %s
-
-        【输出示例风格（仅风格参考，不要照抄内容）】
-        <p><span style="color: rgb(225, 60, 57);"><u><em><strong>智能决策层</strong></em></u></span><strong> = 在“检索”和“生成”之间插入一个判断大脑。<br></strong><img src="/files/images/xxx.png" alt="示意图"/></p>
-        """
-        .formatted(
-            sectionPath,
-            section.getTitle(),
-            safe(request.getProjectParams()),
-            supplement.isBlank() ? "(无)" : supplement,
-            retrievalContext.isBlank() ? "(无)" : retrievalContext);
-    return new DraftOutput(aiClient.chat(systemPrompt, userPrompt), hits);
-  }
-
-  private void persistSectionDraft(Section section,
-      String generated,
-      List<KnowledgeSearchResult> hits,
-      Long operatorId,
-      boolean overwriteExisting,
-      Long taskId) {
-    String content = safe(generated);
-    if (content.isBlank()) {
-      throw new IllegalStateException("AI 返回空内容");
-    }
-    SectionVersion current = section.getCurrentVersion();
-    if (current == null) {
-      current = SectionVersion.builder()
-          .section(section)
-          .content(content)
-          .summary("AI自动编写")
-          .sourceType(SectionSourceType.AI)
-          .sourceRef("ai-auto-task-" + taskId)
-          .createdBy(operatorId)
-          .build();
-      sectionVersionRepository.save(current);
-      section.setCurrentVersion(current);
-      sectionRepository.save(section);
-      sectionChunkRefService.replaceByHits(section, current, hits, operatorId);
-      return;
-    }
-    if (!overwriteExisting && current.getContent() != null && !current.getContent().isBlank()) {
-      return;
-    }
-    current.setContent(content);
-    current.setSummary("AI自动编写");
-    current.setSourceType(SectionSourceType.AI);
-    current.setSourceRef("ai-auto-task-" + taskId);
-    current.setCreatedBy(operatorId);
-    sectionVersionRepository.save(current);
-    sectionChunkRefService.replaceByHits(section, current, hits, operatorId);
-  }
-
-  private record DraftOutput(String content, List<KnowledgeSearchResult> hits) {
-  }
-
-  private List<KnowledgeSearchResult> filterHitsBySection(String sectionPath, String sectionTitle,
-      List<KnowledgeSearchResult> hits) {
-    if (hits == null || hits.isEmpty()) {
-      return List.of();
-    }
-    Set<String> focusTerms = buildFocusTerms(sectionPath, sectionTitle);
-    if (focusTerms.isEmpty()) {
-      return hits.stream().limit(6).toList();
-    }
-
-    class Scored {
-      private final KnowledgeSearchResult hit;
-      private final int match;
-      private final double score;
-
-      private Scored(KnowledgeSearchResult hit, int match, double score) {
-        this.hit = hit;
-        this.match = match;
-        this.score = score;
-      }
-    }
-
-    List<Scored> scored = hits.stream().map(hit -> {
-      String txt = safe(hit.getContent());
-      int match = 0;
-      for (String term : focusTerms) {
-        if (txt.contains(term)) {
-          match++;
-        }
-      }
-      double score = hit.getScore() + (match * 0.08);
-      return new Scored(hit, match, score);
-    }).sorted((a, b) -> Double.compare(b.score, a.score)).toList();
-
-    List<KnowledgeSearchResult> strong = scored.stream()
-        .filter(s -> s.match > 0)
-        .limit(6)
-        .map(s -> s.hit)
-        .toList();
-    if (!strong.isEmpty()) {
-      return strong;
-    }
-    return scored.stream().limit(4).map(s -> s.hit).toList();
-  }
-
-  private Set<String> buildFocusTerms(String sectionPath, String sectionTitle) {
-    Set<String> terms = new LinkedHashSet<>();
-    for (String part : (safe(sectionPath) + " " + safe(sectionTitle)).split("[>\\s、，,：:；;（）()\\-_/]+")) {
-      String term = safe(part);
-      if (term.length() >= 2 && !Set.of("章节", "内容", "说明", "部分", "项目", "方案", "要求").contains(term)) {
-        terms.add(term);
-      }
-    }
-    return terms;
-  }
-
-  private String normalizeHitForPrompt(String content) {
-    String text = safe(content);
-    if (text.contains("[TABLE_JSON]")) {
-      int idx = text.indexOf("[TABLE_JSON]");
-      String head = text.substring(0, idx).trim();
-      return (head.isBlank() ? "结构化表格数据" : head) + "（表格JSON已省略）";
-    }
-    return text;
-  }
-
-  private Map<String, Object> buildStep(Long sectionId, String title, String status, String error) {
-    Map<String, Object> step = new LinkedHashMap<>();
-    step.put("sectionId", sectionId);
-    step.put("title", title);
-    step.put("status", status);
-    if (error != null && !error.isBlank()) {
-      step.put("error", error.length() > 300 ? error.substring(0, 300) : error);
-    }
-    return step;
-  }
-
-  private String buildAutoWriteProgressPayload(int total,
-      int success,
-      int failed,
-      List<Map<String, Object>> detail,
-      String status) {
-    Map<String, Object> payload = new LinkedHashMap<>();
-    payload.put("status", status);
-    payload.put("total", total);
-    payload.put("success", success);
-    payload.put("failed", failed);
-    payload.put("steps", detail);
-    try {
-      return MAPPER.writeValueAsString(payload);
-    } catch (JsonProcessingException e) {
-      return "{\"status\":\"" + status + "\",\"total\":" + total + ",\"success\":" + success + ",\"failed\":" + failed
-          + "}";
-    }
-  }
-
-  private String buildAutoWritePromptPayload(AiDocumentAutoWriteRequest request) {
-    Map<String, Object> payload = new LinkedHashMap<>();
-    payload.put("documentId", request.getDocumentId());
-    payload.put("knowledgeBaseId", request.getKnowledgeBaseId());
-    payload.put("overwriteExisting", request.isOverwriteExisting());
-    payload.put("projectParams", safe(request.getProjectParams()));
-    try {
-      return MAPPER.writeValueAsString(payload);
-    } catch (JsonProcessingException e) {
-      return "{}";
-    }
-  }
-
-  private String safe(String text) {
-    return text == null ? "" : text.trim();
   }
 
   private AiTaskResponse toResponse(AiTask task) {

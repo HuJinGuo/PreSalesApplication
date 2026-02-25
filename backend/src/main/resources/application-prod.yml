@@ -42,8 +42,8 @@ app:
     milvus:
       host: 127.0.0.1
       port: 19530
-      collection: knowledge_chunk_coll
-      embedding-dim: 256
+      collection: knowledge_chunk_vector
+      embedding-dim: 1024
       nprobe: 16
       shards-num: 2
   upload:
@@ -51,16 +51,17 @@ app:
   ai:
     provider: MOCK
     chat-provider: openai
-    embedding-provider: alibaba
+    embedding-provider: openai
     chat-model: nvidia/nemotron-3-nano-30b-a3b
-    embedding-model: multimodal-embedding-v1
-    keyword-model: glm-5
+    # chat-model: z-ai/glm5
+    embedding-model: nvidia/nv-embedqa-e5-v5
+    keyword-model: moonshotai/kimi-k2.5
     openai:
       base-url: https://integrate.api.nvidia.com/v1
-      api-key: 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
+      api-key: 
     alibaba:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api-key: sk-3423fb22eb9a45b2b0a450d81654f810
+      api-key: 
     baidu:
       auth-url: https://aip.baidubce.com/oauth/2.0/token
       chat-url: https://qianfan.baidubce.com/v2/chat/completions

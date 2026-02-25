@@ -84,6 +84,13 @@
         </div>
 
         <div ref="editorShellRef" class="editor-shell" @click="handleEditorShellClick">
+          <div class="footer-actions footer-actions-top">
+            <!-- <el-button @click="openAssetDialog">沉淀为资产</el-button> -->
+            <el-button type="success" @click="aiRewrite">AI改写</el-button>
+            <el-button type="primary" @click="openAutoWriteDialog">AI自动编写全文</el-button>
+            <el-button v-if="autoWriteTaskId" @click="showAutoWriteProgressDialog = true">查看编写进度</el-button>
+            <!-- <el-button type="warning" @click="submitReview">提交审核</el-button> -->
+          </div>
           <Toolbar class="editor-toolbar" :editor="editorRef" :default-config="toolbarConfig" mode="default" />
           <Editor
             v-model="content"
@@ -97,12 +104,9 @@
           支持：标题、表格、列表、图片上传/粘贴；在右侧「图片属性」面板可调整宽度、对齐方式与说明。
         </div>
 
-        <div class="footer-actions">
-          <el-button @click="openAssetDialog">沉淀为资产</el-button>
-          <el-button type="success" @click="aiRewrite">AI改写</el-button>
-          <el-button type="primary" @click="openAutoWriteDialog">AI自动编写全文</el-button>
-          <el-button type="warning" @click="submitReview">提交审核</el-button>
-        </div>
+      </div>
+      <div class="card content content-empty" v-else>
+        <el-empty description="请先在左侧选择一个章节开始编辑" :image-size="90" />
       </div>
 
       <div class="card versions" v-if="currentSection">
@@ -169,12 +173,15 @@
                   <div class="citation-content">{{ row.context || '（无摘要）' }}</div>
                 </div>
               </div>
-              <div class="editor-hint" style="margin-top: 8px;">
+              <!-- <div class="editor-hint" style="margin-top: 8px;">
                 引用来自后端持久化表 <code>section_chunk_ref</code>，不依赖正文中的标记文本。
-              </div>
+              </div> -->
             </div>
           </el-tab-pane>
         </el-tabs>
+      </div>
+      <div class="card versions content-empty" v-else>
+        <el-empty description="选择章节后可查看图片属性与引用片段" :image-size="80" />
       </div>
     </div>
 
@@ -276,6 +283,41 @@
         <el-button type="primary" :loading="autoWriting" @click="startAutoWrite">开始生成</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showAutoWriteProgressDialog"
+      title="AI编写进度"
+      width="780px"
+      :close-on-click-modal="false"
+    >
+      <div class="ai-progress-wrap">
+        <div class="ai-progress-head">
+          <div>任务ID：#{{ autoWriteTaskId || '-' }}</div>
+          <el-tag :type="autoWriteTaskStatusTag">{{ autoWriteTaskStatusLabel }}</el-tag>
+        </div>
+        <el-progress :percentage="autoWriteProgressPercent" :stroke-width="16" :status="autoWriteProgressBarStatus" />
+        <div class="ai-progress-summary">
+          <span>总章节：{{ autoWriteProgress.total }}</span>
+          <span>成功：{{ autoWriteProgress.success }}</span>
+          <span>失败：{{ autoWriteProgress.failed }}</span>
+        </div>
+        <el-table :data="autoWriteProgress.steps" size="small" height="340">
+          <el-table-column prop="sectionId" label="章节ID" width="90" />
+          <el-table-column prop="title" label="章节标题" min-width="240" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'SUCCESS' ? 'success' : row.status === 'FAILED' ? 'danger' : 'info'" size="small">
+                {{ row.status || 'RUNNING' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="error" label="错误信息" min-width="220" show-overflow-tooltip />
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="showAutoWriteProgressDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -319,9 +361,18 @@ const showAssetDialog = ref(false)
 const showApplyTemplate = ref(false)
 const showSaveTemplate = ref(false)
 const showAutoWriteDialog = ref(false)
+const showAutoWriteProgressDialog = ref(false)
 const autoWriting = ref(false)
 const autoWriteKnowledgeBases = ref<any[]>([])
 const autoWriteTaskTimer = ref<number | null>(null)
+const autoWriteTaskId = ref<number | null>(null)
+const autoWriteTaskStatus = ref<string>('PENDING')
+const autoWriteProgress = reactive({
+  total: 0,
+  success: 0,
+  failed: 0,
+  steps: [] as Array<{ sectionId?: number; title?: string; status?: string; error?: string }>
+})
 const templates = ref<any[]>([])
 const rightTab = ref<'image' | 'citation'>('image')
 const images = ref<ImageMeta[]>([])
@@ -357,6 +408,28 @@ const saveStatusText = computed(() => {
 const imageMarkerPreview = computed(() => {
   if (!selectedImage.value) return ''
   return `[img width=${imageForm.width} align=${imageForm.align} caption="${imageForm.caption || ''}"]${imageForm.src}`
+})
+const autoWriteTaskStatusLabel = computed(() => {
+  if (autoWriteTaskStatus.value === 'RUNNING') return '执行中'
+  if (autoWriteTaskStatus.value === 'SUCCESS') return '已完成'
+  if (autoWriteTaskStatus.value === 'FAILED') return '失败'
+  return autoWriteTaskStatus.value || 'PENDING'
+})
+const autoWriteTaskStatusTag = computed(() => {
+  if (autoWriteTaskStatus.value === 'SUCCESS') return 'success'
+  if (autoWriteTaskStatus.value === 'FAILED') return 'danger'
+  return 'info'
+})
+const autoWriteProgressPercent = computed(() => {
+  const total = autoWriteProgress.total || 0
+  if (total <= 0) return autoWriteTaskStatus.value === 'RUNNING' ? 5 : 0
+  const done = (autoWriteProgress.success || 0) + (autoWriteProgress.failed || 0)
+  return Math.max(0, Math.min(100, Math.round((done / total) * 100)))
+})
+const autoWriteProgressBarStatus = computed(() => {
+  if (autoWriteTaskStatus.value === 'FAILED') return 'exception'
+  if (autoWriteTaskStatus.value === 'SUCCESS') return 'success'
+  return undefined
 })
 
 const toolbarConfig = {}
@@ -404,7 +477,16 @@ const centerRenameInputRef = ref()
 
 const normalizeToHtml = (raw: string) => {
   if (!raw) return ''
-  const trimmed = raw.trim()
+  let trimmed = raw.trim()
+  trimmed = trimmed.replace(/\[img(?:\s+([^\]]+))?](\S+)/gi, (_m, attrsRaw = '', url = '') => {
+    const attrs = String(attrsRaw || '')
+    const captionMatch = attrs.match(/caption=(?:"([^"]*)"|'([^']*)'|(\S+))/i)
+    const alt = (captionMatch?.[1] || captionMatch?.[2] || captionMatch?.[3] || '图片').replace(/"/g, '')
+    const src = String(url || '').startsWith('/') ? String(url || '') : `/${String(url || '')}`
+    return `<img src="${src}" alt="${alt}" />`
+  })
+  trimmed = trimmed.replace(/(<img[^>]*\ssrc=["'])(files\/[^"']*)(["'][^>]*>)/gi, '$1/$2$3')
+  trimmed = trimmed.replace(/(<img[^>]*\ssrc=["'])(knowledge-images\/[^"']*)(["'][^>]*>)/gi, '$1/files/$2$3')
   if (/<[a-z][\s\S]*>/i.test(trimmed)) {
     if (trimmed.includes('&lt;table') || trimmed.includes('&lt;tr') || trimmed.includes('&lt;td')) {
       const textarea = window.document.createElement('textarea')
@@ -856,6 +938,28 @@ const clearAutoWriteTimer = () => {
     autoWriteTaskTimer.value = null
   }
 }
+const resetAutoWriteProgress = () => {
+  autoWriteTaskId.value = null
+  autoWriteTaskStatus.value = 'PENDING'
+  autoWriteProgress.total = 0
+  autoWriteProgress.success = 0
+  autoWriteProgress.failed = 0
+  autoWriteProgress.steps = []
+}
+const applyAutoWriteProgress = (task: any) => {
+  autoWriteTaskStatus.value = task?.status || 'PENDING'
+  const raw = task?.response
+  if (!raw) return
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+    autoWriteProgress.total = Number(parsed?.total || 0)
+    autoWriteProgress.success = Number(parsed?.success || 0)
+    autoWriteProgress.failed = Number(parsed?.failed || 0)
+    autoWriteProgress.steps = Array.isArray(parsed?.steps) ? parsed.steps : []
+  } catch {
+    // ignore invalid payload
+  }
+}
 const startAutoWrite = async () => {
   if (!document.value?.id) return
   if (dirty.value) {
@@ -864,6 +968,7 @@ const startAutoWrite = async () => {
   }
   try {
     autoWriting.value = true
+    resetAutoWriteProgress()
     const { data } = await api.aiAutoWriteDocument({
       documentId: document.value.id,
       knowledgeBaseId: autoWriteForm.knowledgeBaseId,
@@ -875,13 +980,16 @@ const startAutoWrite = async () => {
       ElMessage.error('任务创建失败')
       return
     }
+    autoWriteTaskId.value = Number(taskId)
     ElMessage.success(`已启动自动编写任务 #${taskId}`)
     showAutoWriteDialog.value = false
+    showAutoWriteProgressDialog.value = true
     clearAutoWriteTimer()
     autoWriteTaskTimer.value = window.setInterval(async () => {
       try {
         const taskRes = await api.getAiTask(taskId)
         const status = taskRes.data?.status
+        applyAutoWriteProgress(taskRes.data)
         if (status === 'RUNNING') return
         clearAutoWriteTimer()
         autoWriting.value = false
@@ -894,10 +1002,12 @@ const startAutoWrite = async () => {
       } catch (e) {
         clearAutoWriteTimer()
         autoWriting.value = false
+        autoWriteTaskStatus.value = 'FAILED'
       }
     }, 2500)
   } catch {
     autoWriting.value = false
+    autoWriteTaskStatus.value = 'FAILED'
     ElMessage.error('启动自动编写失败')
   }
 }
@@ -1001,14 +1111,20 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .editor {
+  height: calc(100vh - 96px);
+  overflow: hidden;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .editor-grid {
   display: grid;
   grid-template-columns: 300px minmax(0, 1.25fr) minmax(320px, 0.85fr);
   gap: 16px;
-  margin-top: 16px;
+  margin-top: 12px;
+  height: calc(100vh - 196px);
+  min-height: 680px;
 }
 
 .editor :deep(.card) {
@@ -1016,6 +1132,14 @@ onBeforeUnmount(() => {
   border-radius: 16px;
   background: linear-gradient(180deg, #ffffff, #fbfdff);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+  padding: 14px;
+}
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(6px);
 }
 
 .tree-header,
@@ -1085,7 +1209,7 @@ onBeforeUnmount(() => {
 }
 
 .tree {
-  max-height: calc(100vh - 220px);
+  max-height: 100%;
   overflow: auto;
 }
 
@@ -1093,6 +1217,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.content-empty {
+  justify-content: center;
+  align-items: center;
 }
 
 .editor-shell {
@@ -1101,15 +1232,28 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: #fff;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.footer-actions-top {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5ebf5;
+  justify-content: flex-end;
 }
 
 .editor-toolbar {
   border-bottom: 1px solid #e5ebf5;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #fff;
 }
 
 .editor-main {
-  min-height: 520px;
-  max-height: 560px;
+  min-height: 420px;
+  max-height: calc(100vh - 470px);
   overflow-y: auto;
   background: #f1f4f8;
 }
@@ -1141,8 +1285,15 @@ onBeforeUnmount(() => {
 }
 
 .versions {
-  max-height: calc(100vh - 220px);
+  max-height: 100%;
   overflow: auto;
+}
+
+.versions :deep(.el-tabs__header) {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: #fff;
 }
 
 .image-panel {
@@ -1273,6 +1424,27 @@ onBeforeUnmount(() => {
   color: #60708a;
 }
 
+.ai-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #2b3e57;
+  font-size: 13px;
+}
+
+.ai-progress-summary {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  color: #4a5f7a;
+}
+
 :deep(.el-tree) {
   overflow: auto;
 }
@@ -1326,8 +1498,14 @@ onBeforeUnmount(() => {
   }
 
   .tree,
-  .versions {
+  .versions,
+  .content {
     max-height: none;
+    min-height: auto;
+  }
+
+  .editor-main {
+    max-height: 640px;
   }
 }
 

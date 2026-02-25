@@ -1,7 +1,9 @@
 package com.bidcollab.util;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
@@ -59,6 +61,16 @@ public class TextChunker {
    * @return 切分后的文本块列表
    */
   public List<String> splitBySections(String text, int chunkSize, int overlap) {
+    return splitBySectionsWithMetadata(text, chunkSize, overlap).stream().map(StructuredChunk::getContent).toList();
+  }
+
+  /**
+   * 结构化分块：
+   * 1) chunk 内容仅包含“最后一级标题 + 正文”；
+   * 2) sectionPath 记录完整路径（用于后续元数据过滤/加权）；
+   * 3) 对“无正文但有子章节”的父标题生成 ANCHOR chunk，避免父标题语义丢失。
+   */
+  public List<StructuredChunk> splitBySectionsWithMetadata(String text, int chunkSize, int overlap) {
     if (text == null || text.isBlank()) {
       return List.of();
     }
@@ -66,19 +78,28 @@ public class TextChunker {
       throw new IllegalArgumentException("chunkSize must be greater than overlap");
     }
 
-    // 第一步：按标题解析出章节块
     List<SectionBlock> sections = parseSections(text);
-    List<String> result = new ArrayList<>();
+    Map<String, List<String>> childrenByParentPath = buildChildrenMap(sections);
+    List<StructuredChunk> result = new ArrayList<>();
 
     for (SectionBlock section : sections) {
       // 归一化章节内容：统一换行符，压缩多余空行
       String normalized = section.content.replace("\r\n", "\n").replaceAll("\\n{3,}", "\n\n").trim();
       if (normalized.isBlank()) {
+        List<String> children = childrenByParentPath.getOrDefault(section.path, List.of());
+        if (!children.isEmpty()) {
+          result.add(StructuredChunk.builder()
+              .content("[SECTION] " + section.title + "\n子章节：" + String.join("、", children))
+              .sectionTitle(section.title)
+              .sectionPath(section.path)
+              .chunkType("ANCHOR")
+              .build());
+        }
         continue;
       }
 
       // 构造当前章节的上下文前缀，例如 "[SECTION] 第一章 引言\n"
-      // 这有助于在检索时让模型知道当前片段所属的章节
+      // 注意：仅使用最后一级标题，不再拼接父级标题，避免语义污染。
       String sectionPrefix = section.title.isBlank() ? "" : ("[SECTION] " + section.title + "\n");
       // 计算实际可用的内容长度（扣除前缀长度）
       // 这里的 180 是一个保底长度，防止前缀过长导致内容太短
@@ -90,8 +111,12 @@ public class TextChunker {
         int end = Math.min(start + payloadMax, normalized.length());
         String payload = normalized.substring(start, end).trim();
         if (!payload.isBlank()) {
-          // 拼接前缀和内容
-          result.add(sectionPrefix + payload);
+          result.add(StructuredChunk.builder()
+              .content(sectionPrefix + payload)
+              .sectionTitle(section.title)
+              .sectionPath(section.path)
+              .chunkType("TEXT")
+              .build());
         }
         if (end == normalized.length()) {
           break;
@@ -112,7 +137,10 @@ public class TextChunker {
   private List<SectionBlock> parseSections(String text) {
     List<SectionBlock> sections = new ArrayList<>();
     String currentTitle = "";
+    String currentPath = "";
+    int currentLevel = 1;
     StringBuilder currentBody = new StringBuilder();
+    List<String> headingStack = new ArrayList<>();
 
     // 逐行扫描
     for (String rawLine : text.replace("\r\n", "\n").split("\n")) {
@@ -126,9 +154,15 @@ public class TextChunker {
 
       // 如果发现新标题，则将之前的章节内容（如有）保存
       if (isHeadingLine(line)) {
-        flushSection(sections, currentTitle, currentBody);
+        flushSection(sections, currentTitle, currentPath, currentLevel, currentBody);
         // 提取纯标题文本（去除 # 等标记）
         currentTitle = stripHeadingMarker(line);
+        currentLevel = detectHeadingLevel(line);
+        while (headingStack.size() >= currentLevel) {
+          headingStack.remove(headingStack.size() - 1);
+        }
+        headingStack.add(currentTitle);
+        currentPath = String.join(" > ", headingStack);
         currentBody = new StringBuilder();
       } else {
         // 普通文本行追加到当前章节内容
@@ -136,18 +170,47 @@ public class TextChunker {
       }
     }
     // 循环结束后，保存最后一个章节的内容
-    flushSection(sections, currentTitle, currentBody);
+    flushSection(sections, currentTitle, currentPath, currentLevel, currentBody);
     return sections;
   }
 
   /**
    * 将当前累积的内容保存为一个 SectionBlock。
    */
-  private void flushSection(List<SectionBlock> sections, String title, StringBuilder body) {
+  private void flushSection(List<SectionBlock> sections, String title, String path, int level, StringBuilder body) {
+    String normalizedTitle = title == null ? "" : title.trim();
+    String normalizedPath = path == null ? "" : path.trim();
     String content = body.toString().trim();
-    if (!content.isBlank()) {
-      sections.add(new SectionBlock(title == null ? "" : title.trim(), content));
+    if (!content.isBlank() || !normalizedTitle.isBlank()) {
+      sections.add(new SectionBlock(normalizedTitle, normalizedPath, level, content));
     }
+  }
+
+  private Map<String, List<String>> buildChildrenMap(List<SectionBlock> sections) {
+    Map<String, List<String>> map = new HashMap<>();
+    for (SectionBlock section : sections) {
+      String parentPath = parentPath(section.path);
+      if (parentPath.isBlank() || section.title.isBlank()) {
+        continue;
+      }
+      map.computeIfAbsent(parentPath, k -> new ArrayList<>());
+      List<String> children = map.get(parentPath);
+      if (!children.contains(section.title)) {
+        children.add(section.title);
+      }
+    }
+    return map;
+  }
+
+  private String parentPath(String path) {
+    if (path == null || path.isBlank()) {
+      return "";
+    }
+    int idx = path.lastIndexOf(" > ");
+    if (idx < 0) {
+      return "";
+    }
+    return path.substring(0, idx);
   }
 
   /**
@@ -178,13 +241,47 @@ public class TextChunker {
     return line.replaceFirst("^#{1,6}\\s+", "").trim();
   }
 
+  private int detectHeadingLevel(String line) {
+    String trimmed = line == null ? "" : line.trim();
+    if (trimmed.startsWith("#")) {
+      int lv = 0;
+      while (lv < trimmed.length() && trimmed.charAt(lv) == '#') {
+        lv++;
+      }
+      return Math.max(1, Math.min(lv, 6));
+    }
+    if (trimmed.startsWith("第")) {
+      return 1;
+    }
+    java.util.regex.Matcher m = Pattern.compile("^([0-9]+(?:\\.[0-9]+){0,5})").matcher(trimmed);
+    if (m.find()) {
+      String number = m.group(1);
+      int dots = (int) number.chars().filter(ch -> ch == '.').count();
+      return Math.max(1, Math.min(dots + 1, 6));
+    }
+    return 1;
+  }
+
   private static class SectionBlock {
     private final String title;
+    private final String path;
+    private final int level;
     private final String content;
 
-    private SectionBlock(String title, String content) {
+    private SectionBlock(String title, String path, int level, String content) {
       this.title = title;
+      this.path = path;
+      this.level = level;
       this.content = content;
     }
+  }
+
+  @lombok.Builder
+  @lombok.Getter
+  public static class StructuredChunk {
+    private String content;
+    private String sectionTitle;
+    private String sectionPath;
+    private String chunkType;
   }
 }

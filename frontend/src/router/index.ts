@@ -16,6 +16,7 @@ import DeptManagementView from '@/views/DeptManagementView.vue'
 import UserManagementView from '@/views/UserManagementView.vue'
 import MenuManagementView from '@/views/MenuManagementView.vue'
 import RoleManagementView from '@/views/RoleManagementView.vue'
+import AiTokenUsageView from '@/views/AiTokenUsageView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
@@ -41,6 +42,7 @@ const router = createRouter({
         { path: '/base/users', component: UserManagementView },
         { path: '/base/roles', component: RoleManagementView },
         { path: '/base/menus', component: MenuManagementView },
+        { path: '/base/ai-token-usage', component: AiTokenUsageView },
         { path: '/exports/:docId', component: ExportHistoryView }
       ]
     }

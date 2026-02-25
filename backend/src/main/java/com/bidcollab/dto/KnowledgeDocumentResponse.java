@@ -17,6 +17,7 @@ public class KnowledgeDocumentResponse {
   private String visibility;
   private String indexStatus;
   private String indexMessage;
+  private Integer indexProgress;
   private Instant indexedAt;
   private Instant createdAt;
 }

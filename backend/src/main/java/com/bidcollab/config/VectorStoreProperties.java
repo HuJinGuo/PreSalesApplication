@@ -14,7 +14,7 @@ public class VectorStoreProperties {
     private String host = "127.0.0.1";
     private int port = 19530;
     private String collection = "knowledge_chunk_vector";
-    private int embeddingDim = 256;
+    private int embeddingDim = 1024;
     private int nprobe = 16;
     private int shardsNum = 2;
   }

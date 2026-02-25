@@ -11,6 +11,9 @@ public class KnowledgeChunkResponse {
   private Long knowledgeBaseId;
   private Long knowledgeDocumentId;
   private Integer chunkIndex;
+  private String sectionTitle;
+  private String sectionPath;
+  private String chunkType;
   private String content;
   private Integer embeddingDim;
   private List<String> keywords;

@@ -47,6 +47,15 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="索引进度" width="220">
+          <template #default="scope">
+            <el-progress
+              :percentage="Number(scope.row.indexProgress || 0)"
+              :status="scope.row.indexStatus === 'FAILED' ? 'exception' : (scope.row.indexStatus === 'SUCCESS' ? 'success' : undefined)"
+              :stroke-width="14"
+            />
+          </template>
+        </el-table-column>
         <el-table-column prop="storagePath" label="存储路径" />
         <el-table-column prop="visibility" label="可见性" width="140">
           <template #default="scope">
@@ -54,6 +63,13 @@
               <el-option label="PRIVATE" value="PRIVATE" />
               <el-option label="PUBLIC" value="PUBLIC" />
             </el-select>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="140">
+          <template #default="scope">
+            <el-button size="small" type="danger" @click="removeDocument(scope.row)">
+              {{ scope.row.indexStatus === 'RUNNING' || scope.row.indexStatus === 'PENDING' ? '取消并删除' : '删除' }}
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -191,6 +207,14 @@ const reindexKb = async () => {
   await loadDocuments()
 }
 
+const removeDocument = async (row: any) => {
+  if (!selectedKb.value) return
+  await ElMessageBox.confirm(`确定删除文档“${row.title}”吗？`, '删除确认', { type: 'warning' })
+  await api.deleteKnowledgeDocument(selectedKb.value.id, row.id)
+  ElMessage.success('文档已删除')
+  await loadDocuments()
+}
+
 const removeKb = async (row: any) => {
   await ElMessageBox.confirm(`确定删除知识库“${row.name}”吗？`, '删除确认', { type: 'warning' })
   await api.deleteKnowledgeBase(row.id)
@@ -325,7 +349,7 @@ onBeforeUnmount(() => stopIndexPolling())
 .index-message {
   color: #64748b;
   font-size: 12px;
-  max-width: 140px;
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

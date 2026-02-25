@@ -47,6 +47,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -59,10 +60,15 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -80,10 +86,13 @@ import org.springframework.beans.factory.annotation.Value;
  */
 @Service
 public class KnowledgeBaseService {
+  private static final Logger log = LoggerFactory.getLogger(KnowledgeBaseService.class);
   private static final String INDEX_PENDING = "PENDING";
   private static final String INDEX_RUNNING = "RUNNING";
   private static final String INDEX_SUCCESS = "SUCCESS";
   private static final String INDEX_FAILED = "FAILED";
+  private static final String INDEX_CANCELED = "CANCELED";
+  private static final Duration INDEX_STALE_TIMEOUT = Duration.ofMinutes(30);
   /** JSON 序列化工具 */
   private static final ObjectMapper MAPPER = new ObjectMapper();
   /** 分词正则：按非汉字/字母/数字字符切分 */
@@ -249,6 +258,7 @@ public class KnowledgeBaseService {
         .visibility(KnowledgeVisibility.PRIVATE)
         .indexStatus(INDEX_PENDING)
         .indexMessage("已加入重建队列")
+        .indexProgress(0)
         .createdBy(currentUserService.getCurrentUserId())
         .build();
     documentRepository.save(doc);
@@ -283,6 +293,7 @@ public class KnowledgeBaseService {
         .visibility(KnowledgeVisibility.PRIVATE)
         .indexStatus(INDEX_PENDING)
         .indexMessage("上传成功，待解析并向量化")
+        .indexProgress(0)
         .createdBy(currentUserService.getCurrentUserId())
         .build();
     documentRepository.save(doc);
@@ -338,9 +349,30 @@ public class KnowledgeBaseService {
    */
   public List<KnowledgeDocumentResponse> listDocuments(Long kbId) {
     Long userId = currentUserService.getCurrentUserId();
-    return listAccessibleDocuments(kbId, userId).stream()
+    List<KnowledgeDocument> docs = listAccessibleDocuments(kbId, userId);
+    recoverStaleIndexTasks(docs);
+    return docs.stream()
         .map(this::toDocumentResponse)
         .collect(Collectors.toList());
+  }
+
+  @Transactional
+  public void deleteDocument(Long kbId, Long documentId) {
+    KnowledgeDocument doc = getDocumentInKb(kbId, documentId);
+    assertDocumentOwner(doc);
+    // 先切换 taskId，避免并发中的旧索引任务继续覆盖状态。
+    doc.setIndexTaskId(UUID.randomUUID().toString().replace("-", ""));
+    doc.setIndexStatus(INDEX_CANCELED);
+    doc.setIndexMessage("文档已删除");
+    doc.setIndexProgress(0);
+    doc.setIndexedAt(Instant.now());
+    documentRepository.save(doc);
+
+    permissionRepository.deleteByKnowledgeDocumentId(doc.getId());
+    chunkTermRepository.deleteByKnowledgeDocumentId(doc.getId());
+    chunkRepository.deleteByKnowledgeDocumentId(doc.getId());
+    milvusVectorService.deleteByDocumentId(doc.getId());
+    documentRepository.delete(doc);
   }
 
   /**
@@ -950,10 +982,36 @@ public class KnowledgeBaseService {
     doc.setIndexTaskId(taskId);
     doc.setIndexStatus(INDEX_PENDING);
     doc.setIndexMessage("排队中");
+    doc.setIndexProgress(0);
     doc.setIndexedAt(null);
     documentRepository.save(doc);
+    Runnable submitTask = () -> safeSubmitReindexTask(documentId, taskId, refreshFromStoredFile);
+    // 避免“主事务未提交，子线程先读取”导致任务未真正启动而状态卡在 PENDING。
+    if (TransactionSynchronizationManager.isActualTransactionActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          submitTask.run();
+        }
+      });
+    } else {
+      submitTask.run();
+    }
+  }
 
-    knowledgeReindexExecutor.submit(() -> runReindexTask(documentId, taskId, refreshFromStoredFile));
+  /**
+   * 安全提交重建任务，避免 afterCommit 中提交失败时文档永久停留在 PENDING。
+   */
+  private void safeSubmitReindexTask(Long documentId, String taskId, boolean refreshFromStoredFile) {
+    try {
+      knowledgeReindexExecutor.submit(() -> runReindexTask(documentId, taskId, refreshFromStoredFile));
+    } catch (RejectedExecutionException ex) {
+      log.error("Reindex task rejected. docId={}, taskId={}", documentId, taskId, ex);
+      tryUpdateTaskStatus(documentId, taskId, INDEX_FAILED, "任务入队失败：线程池不可用", 0);
+    } catch (Exception ex) {
+      log.error("Reindex task submit failed. docId={}, taskId={}", documentId, taskId, ex);
+      tryUpdateTaskStatus(documentId, taskId, INDEX_FAILED, "任务入队失败：" + ex.getMessage(), 0);
+    }
   }
 
   /**
@@ -962,7 +1020,7 @@ public class KnowledgeBaseService {
    * 通过 taskId 防止旧任务覆盖新任务状态。
    */
   private void runReindexTask(Long documentId, String taskId, boolean refreshFromStoredFile) {
-    if (!tryUpdateTaskStatus(documentId, taskId, INDEX_RUNNING, "索引重建中")) {
+    if (!tryUpdateTaskStatus(documentId, taskId, INDEX_RUNNING, "索引重建中", 2)) {
       return;
     }
     try {
@@ -979,14 +1037,43 @@ public class KnowledgeBaseService {
         documentRepository.save(doc);
       }
 
-      reindexDocument(doc);
-      tryUpdateTaskStatus(documentId, taskId, INDEX_SUCCESS, "索引完成");
+      reindexDocument(doc, taskId);
+      tryUpdateTaskStatus(documentId, taskId, INDEX_SUCCESS, "索引完成", 100);
+    } catch (EntityNotFoundException ignored) {
+      // 文档被删除时，后台任务自然退出即可。
     } catch (Exception ex) {
       String message = ex.getMessage() == null ? "索引失败" : ex.getMessage();
       if (message.length() > 900) {
         message = message.substring(0, 900);
       }
-      tryUpdateTaskStatus(documentId, taskId, INDEX_FAILED, message);
+      tryUpdateTaskStatus(documentId, taskId, INDEX_FAILED, message, 0);
+    }
+  }
+
+  /**
+   * 清理“卡死”的 PENDING/RUNNING 状态。
+   * 场景：服务重启、进程异常退出后，内存队列丢失，但数据库状态还停留在处理中。
+   */
+  @Transactional
+  protected void recoverStaleIndexTasks(List<KnowledgeDocument> docs) {
+    Instant now = Instant.now();
+    for (KnowledgeDocument doc : docs) {
+      String status = doc.getIndexStatus();
+      if (!(INDEX_PENDING.equals(status) || INDEX_RUNNING.equals(status))) {
+        continue;
+      }
+      Instant heartbeat = doc.getUpdatedAt() == null ? doc.getCreatedAt() : doc.getUpdatedAt();
+      if (heartbeat == null) {
+        continue;
+      }
+      if (Duration.between(heartbeat, now).compareTo(INDEX_STALE_TIMEOUT) < 0) {
+        continue;
+      }
+      doc.setIndexStatus(INDEX_FAILED);
+      doc.setIndexProgress(0);
+      doc.setIndexedAt(now);
+      doc.setIndexMessage("任务超时中断（服务重启或队列丢失），请重试重建索引");
+      documentRepository.save(doc);
     }
   }
 
@@ -994,12 +1081,19 @@ public class KnowledgeBaseService {
    * CAS 风格更新任务状态：仅当前任务仍是最新 taskId 时才更新。
    */
   private boolean tryUpdateTaskStatus(Long documentId, String taskId, String status, String message) {
+    return tryUpdateTaskStatus(documentId, taskId, status, message, null);
+  }
+
+  private boolean tryUpdateTaskStatus(Long documentId, String taskId, String status, String message, Integer progress) {
     KnowledgeDocument doc = documentRepository.findById(documentId).orElseThrow(EntityNotFoundException::new);
     if (!taskId.equals(doc.getIndexTaskId())) {
       return false;
     }
     doc.setIndexStatus(status);
     doc.setIndexMessage(message);
+    if (progress != null) {
+      doc.setIndexProgress(Math.max(0, Math.min(100, progress)));
+    }
     if (INDEX_SUCCESS.equals(status) || INDEX_FAILED.equals(status)) {
       doc.setIndexedAt(Instant.now());
     } else {
@@ -1017,24 +1111,25 @@ public class KnowledgeBaseService {
    *
    * @param doc 待重建索引的知识文档
    */
-  private void reindexDocument(KnowledgeDocument doc) {
+  private void reindexDocument(KnowledgeDocument doc, String taskId) {
+    tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "删除旧索引", 8);
     // 删除旧索引，避免历史脏块影响召回质量。
     milvusVectorService.deleteByDocumentId(doc.getId());
     chunkTermRepository.deleteByKnowledgeDocumentId(doc.getId());
     chunkRepository.deleteByKnowledgeDocumentId(doc.getId());
-    // 章节感知切分优先保留“同章节语义连贯性”。
-    List<String> rawChunks = textChunker.splitBySections(doc.getContent(), 900, 140);
+    tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "切分文档中", 18);
+    // 新策略：chunk = 最后一级标题 + 正文；完整路径进入元数据（sectionPath）。
+    List<TextChunker.StructuredChunk> rawChunks = textChunker.splitBySectionsWithMetadata(doc.getContent(), 900, 140);
     // 去重/去噪，控制 chunk 数量，避免大文档压垮 embedding 过程。
-    List<String> chunks = compactChunks(rawChunks);
-    // [AI-READ] 表格双轨：正文分块之外，额外生成结构化表格 JSON 分块，便于精确检索。
-    chunks.addAll(extractTableJsonChunks(doc.getContent()));
+    List<TextChunker.StructuredChunk> chunks = compactStructuredChunks(rawChunks);
 
     // *领域词典处理 */
     Map<String, Map<String, String>> aliasMap = domainLexiconService
         .buildEffectiveLexiconAliasMap(doc.getKnowledgeBase().getId());
 
-    List<String> embeddingChunks = chunks.stream().map(chunk -> normalizeChunkByLexicon(chunk, aliasMap)).toList();
+    List<String> embeddingChunks = chunks.stream().map(chunk -> normalizeChunkByLexicon(chunk.getContent(), aliasMap)).toList();
 
+    tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "生成向量中", 28);
     // 并行调用 embedding API：各 chunk 之间互相独立，线程池控制并发数。
     @SuppressWarnings("unchecked")
     CompletableFuture<List<Double>>[] futures = new CompletableFuture[chunks.size()];
@@ -1044,24 +1139,30 @@ public class KnowledgeBaseService {
     }
     // 等待全部完成
     CompletableFuture.allOf(futures).join();
+    tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "保存向量中", 56);
 
     // 按原始顺序收集结果并持久化；同时缓存关键词/实体，供图谱直接读取，避免在线重复抽取。
     List<KnowledgeChunkTerm> terms = new ArrayList<>();
     List<MilvusVectorService.ChunkVectorRecord> vectorRecords = new ArrayList<>();
+    int progressStep = Math.max(1, chunks.size() / 12);
     for (int i = 0; i < chunks.size(); i++) {
       List<Double> embedding = futures[i].join();
+      TextChunker.StructuredChunk structured = chunks.get(i);
       KnowledgeChunk chunk = KnowledgeChunk.builder()
           .knowledgeBase(doc.getKnowledgeBase())
           .knowledgeDocument(doc)
           .chunkIndex(i + 1)
-          .content(chunks.get(i))
+          .sectionTitle(structured.getSectionTitle())
+          .sectionPath(structured.getSectionPath())
+          .chunkType(structured.getChunkType())
+          .content(structured.getContent())
           .embeddingJson("[]")
           .embeddingDim(embedding.size())
           .build();
       chunkRepository.save(chunk);
       vectorRecords.add(new MilvusVectorService.ChunkVectorRecord(chunk.getId(), chunk.getChunkIndex(), embedding));
 
-      Map<String, Integer> keywordFreq = extractKeywordFrequency(chunks.get(i), 10);
+      Map<String, Integer> keywordFreq = extractKeywordFrequency(structured.getContent(), 10);
       for (Map.Entry<String, Integer> e : keywordFreq.entrySet()) {
         terms.add(KnowledgeChunkTerm.builder()
             .knowledgeBase(doc.getKnowledgeBase())
@@ -1074,7 +1175,7 @@ public class KnowledgeBaseService {
             .build());
       }
 
-      Map<String, Integer> entityFreq = extractDomainEntityFrequency(chunks.get(i), aliasMap);
+      Map<String, Integer> entityFreq = extractDomainEntityFrequency(structured.getContent(), aliasMap);
       for (Map.Entry<String, Integer> e : entityFreq.entrySet()) {
         terms.add(KnowledgeChunkTerm.builder()
             .knowledgeBase(doc.getKnowledgeBase())
@@ -1086,6 +1187,10 @@ public class KnowledgeBaseService {
             .frequency(e.getValue())
             .build());
       }
+      if (i % progressStep == 0 || i == chunks.size() - 1) {
+        int p = 56 + (int) (((i + 1) * 1.0 / Math.max(chunks.size(), 1)) * 38);
+        tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "保存中 " + (i + 1) + "/" + chunks.size(), p);
+      }
     }
     if (!terms.isEmpty()) {
       chunkTermRepository.saveAll(terms);
@@ -1093,6 +1198,7 @@ public class KnowledgeBaseService {
     if (!vectorRecords.isEmpty()) {
       milvusVectorService.upsert(doc.getKnowledgeBase().getId(), doc.getId(), vectorRecords);
     }
+    tryUpdateTaskStatus(doc.getId(), taskId, INDEX_RUNNING, "索引收尾中", 98);
   }
 
   // [AI-READ] 从纯文本中识别“|”分隔的表格并转为 JSON 分块，保留结构化信息。
@@ -1229,6 +1335,39 @@ public class KnowledgeBaseService {
       String key = normalized.toLowerCase();
       if (dedup.add(key)) {
         result.add(normalized);
+      }
+      if (result.size() >= 1200) {
+        break;
+      }
+    }
+    return result;
+  }
+
+  private List<TextChunker.StructuredChunk> compactStructuredChunks(List<TextChunker.StructuredChunk> rawChunks) {
+    if (rawChunks == null || rawChunks.isEmpty()) {
+      return List.of();
+    }
+    Set<String> dedup = new HashSet<>();
+    List<TextChunker.StructuredChunk> result = new ArrayList<>();
+    for (TextChunker.StructuredChunk chunk : rawChunks) {
+      if (chunk == null || chunk.getContent() == null) {
+        continue;
+      }
+      String normalized = chunk.getContent()
+          .replaceAll("\\s+", " ")
+          .replaceAll("[\\p{Punct}]{3,}", " ")
+          .trim();
+      if (normalized.length() < 20) {
+        continue;
+      }
+      String key = ((chunk.getSectionPath() == null ? "" : chunk.getSectionPath()) + "|" + normalized).toLowerCase();
+      if (dedup.add(key)) {
+        result.add(TextChunker.StructuredChunk.builder()
+            .content(normalized)
+            .sectionTitle(chunk.getSectionTitle())
+            .sectionPath(chunk.getSectionPath())
+            .chunkType(chunk.getChunkType())
+            .build());
       }
       if (result.size() >= 1200) {
         break;
@@ -1813,6 +1952,7 @@ public class KnowledgeBaseService {
         .visibility(doc.getVisibility().name())
         .indexStatus(indexStatus)
         .indexMessage(doc.getIndexMessage())
+        .indexProgress(doc.getIndexProgress() == null ? (INDEX_SUCCESS.equals(indexStatus) ? 100 : 0) : doc.getIndexProgress())
         .indexedAt(doc.getIndexedAt())
         .createdAt(doc.getCreatedAt())
         .build();
@@ -1825,6 +1965,9 @@ public class KnowledgeBaseService {
         .knowledgeBaseId(chunk.getKnowledgeBase().getId())
         .knowledgeDocumentId(chunk.getKnowledgeDocument() == null ? null : chunk.getKnowledgeDocument().getId())
         .chunkIndex(chunk.getChunkIndex())
+        .sectionTitle(chunk.getSectionTitle())
+        .sectionPath(chunk.getSectionPath())
+        .chunkType(chunk.getChunkType())
         .content(chunk.getContent())
         .embeddingDim(chunk.getEmbeddingDim())
         .keywords(keywords)

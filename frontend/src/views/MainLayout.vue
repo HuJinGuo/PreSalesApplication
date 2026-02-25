@@ -170,7 +170,8 @@ import {
   Tickets,
   User,
   UserFilled,
-  Avatar
+  Avatar,
+  DataAnalysis
 } from '@element-plus/icons-vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -232,7 +233,8 @@ const fallbackMenus = [
       { id: 8, title: '部门管理', path: '/base/depts', icon: 'OfficeBuilding', children: [] },
       { id: 9, title: '用户管理', path: '/base/users', icon: 'UserFilled', children: [] },
       { id: 10, title: '角色管理', path: '/base/roles', icon: 'Avatar', children: [] },
-      { id: 11, title: '菜单管理', path: '/base/menus', icon: 'Menu', children: [] }
+      { id: 11, title: '菜单管理', path: '/base/menus', icon: 'Menu', children: [] },
+      { id: 12, title: 'AI Token统计', path: '/base/ai-token-usage', icon: 'DataAnalysis', children: [] }
     ]
   }
 ]
@@ -248,7 +250,8 @@ const iconMap: Record<string, any> = {
   UserFilled,
   Menu,
   Reading,
-  Avatar
+  Avatar,
+  DataAnalysis
 }
 
 const logout = () => {

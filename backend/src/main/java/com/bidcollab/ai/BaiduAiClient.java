@@ -23,6 +23,12 @@ class BaiduAiClient {
   private String accessToken;
   private Instant expireAt = Instant.EPOCH;
 
+  record ChatResult(String content, Integer promptTokens, Integer completionTokens, Integer totalTokens) {
+  }
+
+  record EmbeddingResult(List<Double> vector, Integer promptTokens, Integer totalTokens) {
+  }
+
   BaiduAiClient(AiProviderProperties.Baidu conf) {
     this.conf = conf;
   }
@@ -51,6 +57,10 @@ class BaiduAiClient {
   }
 
   String chat(String model, String systemPrompt, String userPrompt) throws IOException, InterruptedException {
+    return chatWithUsage(model, systemPrompt, userPrompt).content();
+  }
+
+  ChatResult chatWithUsage(String model, String systemPrompt, String userPrompt) throws IOException, InterruptedException {
     String payload = MAPPER.writeValueAsString(Map.of(
         "model", model,
         "messages", List.of(
@@ -59,21 +69,35 @@ class BaiduAiClient {
     ));
     String result = post(conf.getChatUrl(), payload);
     JsonNode root = MAPPER.readTree(result);
-    return root.path("result").asText(root.path("choices").path(0).path("message").path("content").asText());
+    JsonNode usage = root.path("usage");
+    return new ChatResult(
+        root.path("result").asText(root.path("choices").path(0).path("message").path("content").asText()),
+        usage.path("prompt_tokens").isMissingNode() ? null : usage.path("prompt_tokens").asInt(),
+        usage.path("completion_tokens").isMissingNode() ? null : usage.path("completion_tokens").asInt(),
+        usage.path("total_tokens").isMissingNode() ? null : usage.path("total_tokens").asInt());
   }
 
   List<Double> embedding(String model, String text) throws IOException, InterruptedException {
+    return embeddingWithUsage(model, text).vector();
+  }
+
+  EmbeddingResult embeddingWithUsage(String model, String text) throws IOException, InterruptedException {
     String payload = MAPPER.writeValueAsString(Map.of(
         "model", model,
         "input", List.of(text)
     ));
     String result = post(conf.getEmbeddingUrl(), payload);
-    JsonNode arr = MAPPER.readTree(result).path("data").path(0).path("embedding");
+    JsonNode root = MAPPER.readTree(result);
+    JsonNode arr = root.path("data").path(0).path("embedding");
     List<Double> vec = new ArrayList<>();
     for (JsonNode n : arr) {
       vec.add(n.asDouble());
     }
-    return vec;
+    JsonNode usage = root.path("usage");
+    return new EmbeddingResult(
+        vec,
+        usage.path("prompt_tokens").isMissingNode() ? null : usage.path("prompt_tokens").asInt(),
+        usage.path("total_tokens").isMissingNode() ? null : usage.path("total_tokens").asInt());
   }
 
   private String post(String url, String payload) throws IOException, InterruptedException {

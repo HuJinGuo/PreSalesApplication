@@ -31,6 +31,15 @@ public class KnowledgeChunk extends BaseEntity {
   @Column(name = "chunk_index", nullable = false)
   private Integer chunkIndex;
 
+  @Column(name = "section_title", length = 255)
+  private String sectionTitle;
+
+  @Column(name = "section_path", length = 1000)
+  private String sectionPath;
+
+  @Column(name = "chunk_type", length = 32)
+  private String chunkType;
+
   @Column(columnDefinition = "TEXT", nullable = false)
   private String content;
 
