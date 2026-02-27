@@ -86,7 +86,8 @@ public class AiService {
     aiTaskRepository.save(task);
 
     try {
-      List<SectionChunkRef> refs = sectionChunkRefRepository.findBySectionIdOrderByParagraphIndexAscIdAsc(section.getId());
+      List<SectionChunkRef> refs = sectionChunkRefRepository
+          .findBySectionIdOrderByParagraphIndexAscIdAsc(section.getId());
       String citationContext = buildCitationContext(refs);
       boolean hasCitations = !citationContext.isBlank();
       String systemPrompt = """
@@ -129,7 +130,7 @@ public class AiService {
       task.setFinishedAt(Instant.now());
     }
 
-    return toResponse(task);
+    return AiTaskResponse.from(task);
   }
 
   private String buildCitationContext(List<SectionChunkRef> refs) {
@@ -170,7 +171,7 @@ public class AiService {
 
   public AiTaskResponse getTask(Long taskId) {
     AiTask task = aiTaskRepository.findById(taskId).orElseThrow(EntityNotFoundException::new);
-    return toResponse(task);
+    return AiTaskResponse.from(task);
   }
 
   /**
@@ -373,16 +374,4 @@ public class AiService {
     return effectiveLen >= 8 || topK >= 6;
   }
 
-  private AiTaskResponse toResponse(AiTask task) {
-    return AiTaskResponse.builder()
-        .id(task.getId())
-        .sectionId(task.getSectionId())
-        .sourceVersionId(task.getSourceVersionId())
-        .resultVersionId(task.getResultVersionId())
-        .status(task.getStatus())
-        .errorMessage(task.getErrorMessage())
-        .response(task.getResponse())
-        .createdAt(task.getCreatedAt())
-        .build();
-  }
 }

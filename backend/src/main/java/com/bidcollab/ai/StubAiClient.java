@@ -7,8 +7,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import com.bidcollab.service.AiTokenUsageService;
 import com.bidcollab.service.CurrentUserService;
 import org.springframework.stereotype.Component;
@@ -29,6 +27,79 @@ public class StubAiClient implements AiClient {
     this.currentUserService = currentUserService;
   }
 
+  // ── 统一分发结果 ────────────────────────────────────
+
+  /** 聊天分发结果（统一 OpenAI / Baidu 等不同 SDK 的返回） */
+  private record ChatDispatchResult(String content, Integer promptTokens,
+      Integer completionTokens, Integer totalTokens) {
+  }
+
+  /** 向量分发结果 */
+  private record EmbeddingDispatchResult(List<Double> vector, Integer promptTokens,
+      Integer totalTokens) {
+  }
+
+  // ── 按 provider 获取 OpenAI 兼容客户端 ────────────────
+
+  private OpenAiCompatibleClient resolveOpenAiClient(AiProviderType provider) {
+    return switch (provider) {
+      case OPENAI -> new OpenAiCompatibleClient(
+          props.getOpenAi().getBaseUrl(), props.getOpenAi().getApiKey());
+      case ALIBABA -> new OpenAiCompatibleClient(
+          props.getAlibaba().getBaseUrl(), props.getAlibaba().getApiKey());
+      case SELF_HOSTED -> new OpenAiCompatibleClient(
+          props.getSelfHosted().getBaseUrl(), props.getSelfHosted().getApiKey());
+      default -> throw new IllegalArgumentException("Provider " + provider + " 不支持 OpenAI 兼容协议");
+    };
+  }
+
+  // ── 聊天分发（消除 OPENAI/ALIBABA/SELF_HOSTED/BAIDU 四分支重复） ──
+
+  private ChatDispatchResult dispatchChat(AiProviderType provider, String model,
+      String systemPrompt, String userPrompt) throws Exception {
+    if (provider == AiProviderType.BAIDU) {
+      BaiduAiClient baiduClient = new BaiduAiClient(props.getBaidu());
+      BaiduAiClient.ChatResult res = baiduClient.chatWithUsage(model, systemPrompt, userPrompt);
+      return new ChatDispatchResult(res.content(), res.promptTokens(),
+          res.completionTokens(), res.totalTokens());
+    }
+    // OPENAI / ALIBABA / SELF_HOSTED 均走 OpenAI 兼容协议
+    OpenAiCompatibleClient client = resolveOpenAiClient(provider);
+    OpenAiCompatibleClient.ChatResult res = client.chatWithUsage(model, systemPrompt, userPrompt);
+    return new ChatDispatchResult(res.content(), res.promptTokens(),
+        res.completionTokens(), res.totalTokens());
+  }
+
+  // ── 向量分发 ────────────────────────────────────
+
+  private EmbeddingDispatchResult dispatchEmbedding(AiProviderType provider, String model,
+      String text) throws Exception {
+    if (provider == AiProviderType.BAIDU) {
+      BaiduAiClient baiduClient = new BaiduAiClient(props.getBaidu());
+      BaiduAiClient.EmbeddingResult res = baiduClient.embeddingWithUsage(model, text);
+      return new EmbeddingDispatchResult(res.vector(), res.promptTokens(), res.totalTokens());
+    }
+    OpenAiCompatibleClient client = resolveOpenAiClient(provider);
+    OpenAiCompatibleClient.EmbeddingResult res = client.embeddingWithUsage(model, text);
+    return new EmbeddingDispatchResult(res.vector(), res.promptTokens(), res.totalTokens());
+  }
+
+  // ── Token 用量统一上报（消除 3 处 finally 块的重复） ──────
+
+  private void recordUsage(String requestType, String scene, AiProviderType provider,
+      String model, int promptTokens, int completionTokens, long latencyMs,
+      boolean estimated, boolean success) {
+    tokenUsageService.record(
+        requestType, provider.name(), model, scene,
+        promptTokens, completionTokens, promptTokens + completionTokens,
+        latencyMs, estimated, success,
+        currentUserService.getCurrentUserId());
+  }
+
+  // ══════════════════════════════════════════════════
+  // 公开接口
+  // ══════════════════════════════════════════════════
+
   @Override
   public String chat(String systemPrompt, String userPrompt) {
     // [AI-READ] 对话调用：失败时降级为可读兜底内容，避免阻塞主流程。
@@ -41,56 +112,18 @@ public class StubAiClient implements AiClient {
     int completionTokens = 0;
     boolean estimated = true;
     try {
-      switch (provider) {
-        case OPENAI:
-          OpenAiCompatibleClient openAiClient = new OpenAiCompatibleClient(
-              props.getOpenAi().getBaseUrl(),
-              props.getOpenAi().getApiKey());
-          OpenAiCompatibleClient.ChatResult openAiRes = openAiClient.chatWithUsage(model, systemPrompt, userPrompt);
-          result = openAiRes.content();
-          UsageTokens tokensA = mergeUsage(openAiRes.promptTokens(), openAiRes.completionTokens(),
-              openAiRes.totalTokens(), systemPrompt, userPrompt, result);
-          promptTokens = tokensA.prompt();
-          completionTokens = tokensA.completion();
-          estimated = tokensA.estimated();
-          break;
-        case ALIBABA:
-          OpenAiCompatibleClient aliClient = new OpenAiCompatibleClient(
-              props.getAlibaba().getBaseUrl(), props.getAlibaba().getApiKey());
-          OpenAiCompatibleClient.ChatResult aliRes = aliClient.chatWithUsage(model, systemPrompt, userPrompt);
-          result = aliRes.content();
-          UsageTokens tokensAli = mergeUsage(aliRes.promptTokens(), aliRes.completionTokens(),
-              aliRes.totalTokens(), systemPrompt, userPrompt, result);
-          promptTokens = tokensAli.prompt();
-          completionTokens = tokensAli.completion();
-          estimated = tokensAli.estimated();
-          break;
-        case SELF_HOSTED:
-          OpenAiCompatibleClient selfClient = new OpenAiCompatibleClient(
-              props.getSelfHosted().getBaseUrl(), props.getSelfHosted().getApiKey());
-          OpenAiCompatibleClient.ChatResult selfRes = selfClient.chatWithUsage(model, systemPrompt, userPrompt);
-          result = selfRes.content();
-          UsageTokens tokensSelf = mergeUsage(selfRes.promptTokens(), selfRes.completionTokens(),
-              selfRes.totalTokens(), systemPrompt, userPrompt, result);
-          promptTokens = tokensSelf.prompt();
-          completionTokens = tokensSelf.completion();
-          estimated = tokensSelf.estimated();
-          break;
-        case BAIDU:
-          BaiduAiClient baiduClient = new BaiduAiClient(props.getBaidu());
-          BaiduAiClient.ChatResult bdRes = baiduClient.chatWithUsage(model, systemPrompt, userPrompt);
-          result = bdRes.content();
-          UsageTokens tokensBd = mergeUsage(bdRes.promptTokens(), bdRes.completionTokens(),
-              bdRes.totalTokens(), systemPrompt, userPrompt, result);
-          promptTokens = tokensBd.prompt();
-          completionTokens = tokensBd.completion();
-          estimated = tokensBd.estimated();
-          break;
-        case MOCK:
-        default:
-          result = "[MOCK-CHAT]\n" + userPrompt;
-          completionTokens = estimateTextTokens(result);
-          break;
+      if (provider == AiProviderType.MOCK) {
+        // MOCK 模式：原样回显用户输入
+        result = "[MOCK-CHAT]\n" + userPrompt;
+        completionTokens = estimateTextTokens(result);
+      } else {
+        ChatDispatchResult res = dispatchChat(provider, model, systemPrompt, userPrompt);
+        result = res.content();
+        UsageTokens tokens = mergeUsage(res.promptTokens(), res.completionTokens(),
+            res.totalTokens(), systemPrompt, userPrompt, result);
+        promptTokens = tokens.prompt();
+        completionTokens = tokens.completion();
+        estimated = tokens.estimated();
       }
       return result;
     } catch (Exception ex) {
@@ -99,19 +132,8 @@ public class StubAiClient implements AiClient {
       completionTokens = estimateTextTokens(result);
       return result;
     } finally {
-      long latency = Duration.between(start, Instant.now()).toMillis();
-      tokenUsageService.record(
-          "CHAT",
-          provider.name(),
-          model,
-          "chat",
-          promptTokens,
-          completionTokens,
-          promptTokens + completionTokens,
-          latency,
-          estimated,
-          success,
-          currentUserService.getCurrentUserId());
+      recordUsage("CHAT", "chat", provider, model, promptTokens, completionTokens,
+          Duration.between(start, Instant.now()).toMillis(), estimated, success);
     }
   }
 
@@ -126,71 +148,22 @@ public class StubAiClient implements AiClient {
     boolean success = true;
     boolean estimated = true;
     try {
-      List<Double> result;
-      switch (provider) {
-        case OPENAI:
-          OpenAiCompatibleClient openAiClient = new OpenAiCompatibleClient(
-              props.getOpenAi().getBaseUrl(),
-              props.getOpenAi().getApiKey());
-          OpenAiCompatibleClient.EmbeddingResult oa = openAiClient.embeddingWithUsage(model, text);
-          result = oa.vector();
-          UsageTokens tOa = mergeUsage(oa.promptTokens(), 0, oa.totalTokens(), text, "", "");
-          promptTokens = tOa.prompt();
-          completionTokens = tOa.completion();
-          estimated = tOa.estimated();
-          break;
-        case ALIBABA:
-          OpenAiCompatibleClient aliClient = new OpenAiCompatibleClient(
-              props.getAlibaba().getBaseUrl(), props.getAlibaba().getApiKey());
-          OpenAiCompatibleClient.EmbeddingResult ali = aliClient.embeddingWithUsage(model, text);
-          result = ali.vector();
-          UsageTokens tAli = mergeUsage(ali.promptTokens(), 0, ali.totalTokens(), text, "", "");
-          promptTokens = tAli.prompt();
-          completionTokens = tAli.completion();
-          estimated = tAli.estimated();
-          break;
-        case SELF_HOSTED:
-          OpenAiCompatibleClient selfClient = new OpenAiCompatibleClient(
-              props.getSelfHosted().getBaseUrl(), props.getSelfHosted().getApiKey());
-          OpenAiCompatibleClient.EmbeddingResult self = selfClient.embeddingWithUsage(model, text);
-          result = self.vector();
-          UsageTokens tSelf = mergeUsage(self.promptTokens(), 0, self.totalTokens(), text, "", "");
-          promptTokens = tSelf.prompt();
-          completionTokens = tSelf.completion();
-          estimated = tSelf.estimated();
-          break;
-        case BAIDU:
-          BaiduAiClient baiduClient = new BaiduAiClient(props.getBaidu());
-          BaiduAiClient.EmbeddingResult bd = baiduClient.embeddingWithUsage(model, text);
-          result = bd.vector();
-          UsageTokens tBd = mergeUsage(bd.promptTokens(), 0, bd.totalTokens(), text, "", "");
-          promptTokens = tBd.prompt();
-          completionTokens = tBd.completion();
-          estimated = tBd.estimated();
-          break;
-        case MOCK:
-        default:
-          result = fallbackEmbedding(text);
-          break;
+      if (provider == AiProviderType.MOCK) {
+        return fallbackEmbedding(text);
       }
-      return result;
+      EmbeddingDispatchResult res = dispatchEmbedding(provider, model, text);
+      UsageTokens tokens = mergeUsage(res.promptTokens(), 0,
+          res.totalTokens(), text, "", "");
+      promptTokens = tokens.prompt();
+      completionTokens = tokens.completion();
+      estimated = tokens.estimated();
+      return res.vector();
     } catch (Exception ex) {
       success = false;
       return fallbackEmbedding(text);
     } finally {
-      long latency = Duration.between(start, Instant.now()).toMillis();
-      tokenUsageService.record(
-          "EMBEDDING",
-          provider.name(),
-          model,
-          "embedding",
-          promptTokens,
-          completionTokens,
-          promptTokens + completionTokens,
-          latency,
-          estimated,
-          success,
-          currentUserService.getCurrentUserId());
+      recordUsage("EMBEDDING", "embedding", provider, model, promptTokens, completionTokens,
+          Duration.between(start, Instant.now()).toMillis(), estimated, success);
     }
   }
 
@@ -204,10 +177,9 @@ public class StubAiClient implements AiClient {
     boolean success = true;
     boolean estimated = true;
     try {
-      String result;
       String systemPrompt = """
           你是一个专业的行业文档关键词提取助手。
-          请从输入文本中提取“可用于检索/图谱”的关键词，并统计每个关键词在文本中出现的大致频次。
+          请从输入文本中提取"可用于检索/图谱"的关键词，并统计每个关键词在文本中出现的大致频次。
           仅输出 JSON 对象，不要输出任何解释文字，不要使用 markdown 代码块。
           JSON 结构如下：
           {
@@ -218,7 +190,7 @@ public class StubAiClient implements AiClient {
           约束：
           1) frequency 必须是正整数；
           2) 关键词不要超过 20 个；
-          3) 去掉“系统/方案/进行/以及/说明/如下”等无意义词；
+          3) 去掉"系统/方案/进行/以及/说明/如下"等无意义词；
           4) 如果没有有效关键词，返回 {}。
           """;
       String input = text == null ? "" : text.trim();
@@ -226,77 +198,32 @@ public class StubAiClient implements AiClient {
         input = input.substring(0, 4000);
       }
       promptTokens = estimateTextTokens(systemPrompt) + estimateTextTokens(input);
-      switch (provider) {
-        case OPENAI:
-          OpenAiCompatibleClient openAiClient = new OpenAiCompatibleClient(
-              props.getOpenAi().getBaseUrl(),
-              props.getOpenAi().getApiKey());
-          OpenAiCompatibleClient.ChatResult oa = openAiClient.chatWithUsage(model, systemPrompt, input);
-          result = oa.content();
-          UsageTokens tokOa = mergeUsage(oa.promptTokens(), oa.completionTokens(), oa.totalTokens(), systemPrompt,
-              input, result);
-          promptTokens = tokOa.prompt();
-          completionTokens = tokOa.completion();
-          estimated = tokOa.estimated();
-          break;
-        case ALIBABA:
-          OpenAiCompatibleClient aliClient = new OpenAiCompatibleClient(
-              props.getAlibaba().getBaseUrl(), props.getAlibaba().getApiKey());
-          OpenAiCompatibleClient.ChatResult ali = aliClient.chatWithUsage(model, systemPrompt, input);
-          result = ali.content();
-          UsageTokens tokAli = mergeUsage(ali.promptTokens(), ali.completionTokens(), ali.totalTokens(), systemPrompt,
-              input, result);
-          promptTokens = tokAli.prompt();
-          completionTokens = tokAli.completion();
-          estimated = tokAli.estimated();
-          break;
-        case SELF_HOSTED:
-          OpenAiCompatibleClient selfClient = new OpenAiCompatibleClient(
-              props.getSelfHosted().getBaseUrl(), props.getSelfHosted().getApiKey());
-          OpenAiCompatibleClient.ChatResult self = selfClient.chatWithUsage(model, systemPrompt, input);
-          result = self.content();
-          UsageTokens tokSelf = mergeUsage(self.promptTokens(), self.completionTokens(), self.totalTokens(),
-              systemPrompt, input, result);
-          promptTokens = tokSelf.prompt();
-          completionTokens = tokSelf.completion();
-          estimated = tokSelf.estimated();
-          break;
-        case BAIDU:
-          BaiduAiClient baiduClient = new BaiduAiClient(props.getBaidu());
-          BaiduAiClient.ChatResult bd = baiduClient.chatWithUsage(model, systemPrompt, input);
-          result = bd.content();
-          UsageTokens tokBd = mergeUsage(bd.promptTokens(), bd.completionTokens(), bd.totalTokens(), systemPrompt,
-              input, result);
-          promptTokens = tokBd.prompt();
-          completionTokens = tokBd.completion();
-          estimated = tokBd.estimated();
-          break;
-        case MOCK:
-        default:
-          result = "{}";
-          completionTokens = estimateTextTokens(result);
-          break;
+
+      if (provider == AiProviderType.MOCK) {
+        completionTokens = estimateTextTokens("{}");
+        return "{}";
       }
+      ChatDispatchResult res = dispatchChat(provider, model, systemPrompt, input);
+      String result = res.content();
+      UsageTokens tokens = mergeUsage(res.promptTokens(), res.completionTokens(),
+          res.totalTokens(), systemPrompt, input, result);
+      promptTokens = tokens.prompt();
+      completionTokens = tokens.completion();
+      estimated = tokens.estimated();
       return result == null ? "{}" : result.trim();
     } catch (Exception ex) {
       success = false;
       return "{}";
     } finally {
-      long latency = Duration.between(start, Instant.now()).toMillis();
-      tokenUsageService.record(
-          "KEYWORD_EXTRACT",
-          provider.name(),
-          model,
-          "extractKeywordFrequency",
-          promptTokens,
-          completionTokens,
-          promptTokens + completionTokens,
-          latency,
-          estimated,
-          success,
-          currentUserService.getCurrentUserId());
+      recordUsage("KEYWORD_EXTRACT", "extractKeywordFrequency", provider, model,
+          promptTokens, completionTokens,
+          Duration.between(start, Instant.now()).toMillis(), estimated, success);
     }
   }
+
+  // ══════════════════════════════════════════════════
+  // 内部工具方法
+  // ══════════════════════════════════════════════════
 
   private UsageTokens mergeUsage(Integer promptTokensRaw,
       Integer completionTokensRaw,

@@ -33,6 +33,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import static com.bidcollab.util.StringUtil.safe;
+
 @Service
 public class DocumentAutoWriteService {
   // [AI-READ] 文档自动编写专用服务：
@@ -81,7 +83,7 @@ public class DocumentAutoWriteService {
         .build();
     aiTaskRepository.save(task);
     aiDocumentExecutor.submit(() -> runAutoWrite(task.getId(), document.getId(), request, operatorId));
-    return toResponse(task);
+    return AiTaskResponse.from(task);
   }
 
   @Transactional
@@ -437,20 +439,4 @@ public class DocumentAutoWriteService {
     }
   }
 
-  private String safe(String text) {
-    return text == null ? "" : text.trim();
-  }
-
-  private AiTaskResponse toResponse(AiTask task) {
-    return AiTaskResponse.builder()
-        .id(task.getId())
-        .sectionId(task.getSectionId())
-        .sourceVersionId(task.getSourceVersionId())
-        .resultVersionId(task.getResultVersionId())
-        .status(task.getStatus())
-        .errorMessage(task.getErrorMessage())
-        .response(task.getResponse())
-        .createdAt(task.getCreatedAt())
-        .build();
-  }
 }

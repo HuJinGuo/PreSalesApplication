@@ -1,5 +1,6 @@
 package com.bidcollab.dto;
 
+import com.bidcollab.entity.AiTask;
 import com.bidcollab.enums.AiTaskStatus;
 import java.time.Instant;
 import lombok.Builder;
@@ -16,4 +17,20 @@ public class AiTaskResponse {
   private String errorMessage;
   private String response;
   private Instant createdAt;
+
+  /**
+   * 从实体对象构建响应 DTO（消除各 Service 中重复的 toResponse 私有方法）。
+   */
+  public static AiTaskResponse from(AiTask task) {
+    return AiTaskResponse.builder()
+        .id(task.getId())
+        .sectionId(task.getSectionId())
+        .sourceVersionId(task.getSourceVersionId())
+        .resultVersionId(task.getResultVersionId())
+        .status(task.getStatus())
+        .errorMessage(task.getErrorMessage())
+        .response(task.getResponse())
+        .createdAt(task.getCreatedAt())
+        .build();
+  }
 }
