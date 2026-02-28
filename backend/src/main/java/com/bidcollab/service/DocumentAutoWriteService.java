@@ -1,6 +1,7 @@
 package com.bidcollab.service;
 
 import com.bidcollab.ai.AiClient;
+import com.bidcollab.ai.AiTraceContext;
 import com.bidcollab.dto.AiDocumentAutoWriteRequest;
 import com.bidcollab.dto.AiTaskResponse;
 import com.bidcollab.dto.KnowledgeSearchRequest;
@@ -103,7 +104,7 @@ public class DocumentAutoWriteService {
           // [AI-READ] supplement 使用当前章节已有正文（可为空），用于给模型提供最小必要上下文。
           String sectionPath = buildSectionPath(section, sections);
           String supplement = section.getCurrentVersion() == null ? "" : safe(section.getCurrentVersion().getContent());
-          DraftOutput draft = generateSectionDraft(section, sectionPath, supplement, request, operatorId);
+          DraftOutput draft = generateSectionDraft(section, sectionPath, supplement, request, operatorId, taskId);
           persistSectionDraft(section, draft.content(), draft.hits(), operatorId, request.isOverwriteExisting(),
               taskId);
           success++;
@@ -179,7 +180,8 @@ public class DocumentAutoWriteService {
       String sectionPath,
       String supplement,
       AiDocumentAutoWriteRequest request,
-      Long operatorId) {
+      Long operatorId,
+      Long taskId) {
     // [AI-READ] 先检索知识片段，再把片段拼成 LLM 的上下文输入。
     List<KnowledgeSearchResult> hits = List.of();
     String retrievalContext = "";
@@ -246,7 +248,9 @@ public class DocumentAutoWriteService {
             safe(request.getProjectParams()),
             supplement.isBlank() ? "(无)" : supplement,
             retrievalContext.isBlank() ? "(无)" : retrievalContext);
-    String raw = aiClient.chat(systemPrompt, userPrompt);
+    AiTraceContext.AiTraceMeta meta = new AiTraceContext.AiTraceMeta(
+        request.getKnowledgeBaseId(), null, section.getId(), taskId, 0, "document-auto-write");
+    String raw = AiTraceContext.with(meta, () -> aiClient.chat(systemPrompt, userPrompt));
     GeneratedPayload payload = parseGeneratedPayload(raw, hits);
     List<KnowledgeSearchResult> citedHits = resolveCitedHits(payload.usedChunkIds(), hits);
     return new DraftOutput(payload.html(), citedHits.isEmpty() ? hits : citedHits);

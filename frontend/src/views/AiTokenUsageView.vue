@@ -78,6 +78,16 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="错误信息" min-width="180" show-overflow-tooltip>
+          <template #default="scope">
+            <span :class="scope.row.success ? 'text-muted' : 'text-danger'">{{ scope.row.errorMessage || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" fixed="right">
+          <template #default="scope">
+            <el-button link type="primary" @click="openRecordDetail(scope.row)">查看详情</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <div class="pager-wrap">
         <el-pagination
@@ -92,6 +102,43 @@
         />
       </div>
     </el-card>
+
+    <el-dialog v-model="showDetailDialog" title="调用详情" width="880px">
+      <el-descriptions :column="2" border size="small" v-if="recordDetail">
+        <el-descriptions-item label="TraceID">{{ recordDetail.traceId || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="时间">{{ recordDetail.createdAt ? new Date(recordDetail.createdAt).toLocaleString() : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="类型">{{ recordDetail.requestType || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="场景">{{ recordDetail.scene || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="服务商 / 模型">{{ `${recordDetail.provider || '-'} / ${recordDetail.modelName || '-'}` }}</el-descriptions-item>
+        <el-descriptions-item label="HTTP状态">{{ recordDetail.httpStatus ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Token(入/出/总)">{{ `${recordDetail.promptTokens || 0} / ${recordDetail.completionTokens || 0} / ${recordDetail.totalTokens || 0}` }}</el-descriptions-item>
+        <el-descriptions-item label="耗时(ms)">{{ recordDetail.latencyMs || 0 }}</el-descriptions-item>
+        <el-descriptions-item label="结果">
+          <el-tag :type="recordDetail.success ? 'success' : 'danger'" size="small">{{ recordDetail.success ? '成功' : '失败' }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="统计方式">
+          <el-tag :type="recordDetail.estimated ? 'warning' : 'info'" size="small">{{ recordDetail.estimated ? '估算' : '官方' }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="知识库/文档/章节/任务">
+          {{ `${recordDetail.knowledgeBaseId ?? '-'} / ${recordDetail.knowledgeDocumentId ?? '-'} / ${recordDetail.sectionId ?? '-'} / ${recordDetail.aiTaskId ?? '-'}` }}
+        </el-descriptions-item>
+        <el-descriptions-item label="错误码/请求ID">
+          {{ `${recordDetail.errorCode || '-'} / ${recordDetail.vendorRequestId || '-'}` }}
+        </el-descriptions-item>
+        <el-descriptions-item label="错误信息" :span="2">
+          <pre class="detail-pre">{{ recordDetail.errorMessage || '-' }}</pre>
+        </el-descriptions-item>
+        <el-descriptions-item label="请求摘要" :span="2">
+          <pre class="detail-pre">{{ recordDetail.requestPayload || '-' }}</pre>
+        </el-descriptions-item>
+        <el-descriptions-item label="响应摘要" :span="2">
+          <pre class="detail-pre">{{ recordDetail.responsePayload || '-' }}</pre>
+        </el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button @click="showDetailDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -120,6 +167,8 @@ const records = ref<any[]>([])
 const recordTotal = ref(0)
 const recordPage = ref(1)
 const recordSize = ref(20)
+const showDetailDialog = ref(false)
+const recordDetail = ref<any>(null)
 const trendRef = ref<HTMLElement | null>(null)
 const recordsTableHeight = ref(260)
 let trendChart: echarts.ECharts | null = null
@@ -170,6 +219,14 @@ const onRecordSizeChange = (size: number) => {
   recordSize.value = size
   recordPage.value = 1
   loadData()
+}
+
+const openRecordDetail = async (row: any) => {
+  const id = Number(row?.id || 0)
+  if (!id) return
+  const { data } = await api.getAiTokenUsageRecordDetail(id)
+  recordDetail.value = data
+  showDetailDialog.value = true
 }
 
 const renderTrendChart = () => {
@@ -289,6 +346,22 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 10px;
+}
+
+.detail-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.text-danger {
+  color: #e35d6a;
+}
+
+.text-muted {
+  color: #8da0ba;
 }
 
 :deep(.main-card > .el-card__body),

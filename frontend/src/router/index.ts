@@ -17,6 +17,8 @@ import UserManagementView from '@/views/UserManagementView.vue'
 import MenuManagementView from '@/views/MenuManagementView.vue'
 import RoleManagementView from '@/views/RoleManagementView.vue'
 import AiTokenUsageView from '@/views/AiTokenUsageView.vue'
+import WorkflowListView from '@/views/WorkflowListView.vue'
+import WorkflowDesignView from '@/views/WorkflowDesignView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
@@ -43,7 +45,9 @@ const router = createRouter({
         { path: '/base/roles', component: RoleManagementView },
         { path: '/base/menus', component: MenuManagementView },
         { path: '/base/ai-token-usage', component: AiTokenUsageView },
-        { path: '/exports/:docId', component: ExportHistoryView }
+        { path: '/exports/:docId', component: ExportHistoryView },
+        { path: '/workflows', component: WorkflowListView },
+        { path: '/workflows/:id/design', component: WorkflowDesignView }
       ]
     }
   ]

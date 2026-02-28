@@ -24,6 +24,10 @@ public class KnowledgeBaseDomainLexicon extends BaseEntity {
   @JoinColumn(name = "knowledge_base_id", nullable = false)
   private KnowledgeBase knowledgeBase;
 
+  @ManyToOne(fetch = FetchType.EAGER)
+  @JoinColumn(name = "category_id", nullable = false)
+  private DomainCategory categoryRef;
+
   @Column(nullable = false, length = 64)
   private String category;
 

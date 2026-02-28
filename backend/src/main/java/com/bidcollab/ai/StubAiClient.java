@@ -6,9 +6,18 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 import com.bidcollab.service.AiTokenUsageService;
 import com.bidcollab.service.CurrentUserService;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -19,12 +28,16 @@ public class StubAiClient implements AiClient {
   private final AiProviderProperties props;
   private final AiTokenUsageService tokenUsageService;
   private final CurrentUserService currentUserService;
+  private final Map<AiProviderType, AtomicInteger> providerKeyCursor = new EnumMap<>(AiProviderType.class);
 
   public StubAiClient(AiProviderProperties props, AiTokenUsageService tokenUsageService,
       CurrentUserService currentUserService) {
     this.props = props;
     this.tokenUsageService = tokenUsageService;
     this.currentUserService = currentUserService;
+    for (AiProviderType type : AiProviderType.values()) {
+      providerKeyCursor.put(type, new AtomicInteger(0));
+    }
   }
 
   // ── 统一分发结果 ────────────────────────────────────
@@ -39,16 +52,23 @@ public class StubAiClient implements AiClient {
       Integer totalTokens) {
   }
 
+  private record HttpErrorInfo(Integer httpStatus, String errorCode) {
+  }
+
   // ── 按 provider 获取 OpenAI 兼容客户端 ────────────────
 
   private OpenAiCompatibleClient resolveOpenAiClient(AiProviderType provider) {
+    return resolveOpenAiClient(provider, null);
+  }
+
+  private OpenAiCompatibleClient resolveOpenAiClient(AiProviderType provider, String apiKeyOverride) {
     return switch (provider) {
       case OPENAI -> new OpenAiCompatibleClient(
-          props.getOpenAi().getBaseUrl(), props.getOpenAi().getApiKey());
+          props.getOpenAi().getBaseUrl(), apiKeyOverride == null ? props.getOpenAi().getApiKey() : apiKeyOverride);
       case ALIBABA -> new OpenAiCompatibleClient(
-          props.getAlibaba().getBaseUrl(), props.getAlibaba().getApiKey());
+          props.getAlibaba().getBaseUrl(), apiKeyOverride == null ? props.getAlibaba().getApiKey() : apiKeyOverride);
       case SELF_HOSTED -> new OpenAiCompatibleClient(
-          props.getSelfHosted().getBaseUrl(), props.getSelfHosted().getApiKey());
+          props.getSelfHosted().getBaseUrl(), apiKeyOverride == null ? props.getSelfHosted().getApiKey() : apiKeyOverride);
       default -> throw new IllegalArgumentException("Provider " + provider + " 不支持 OpenAI 兼容协议");
     };
   }
@@ -63,11 +83,13 @@ public class StubAiClient implements AiClient {
       return new ChatDispatchResult(res.content(), res.promptTokens(),
           res.completionTokens(), res.totalTokens());
     }
-    // OPENAI / ALIBABA / SELF_HOSTED 均走 OpenAI 兼容协议
-    OpenAiCompatibleClient client = resolveOpenAiClient(provider);
-    OpenAiCompatibleClient.ChatResult res = client.chatWithUsage(model, systemPrompt, userPrompt);
-    return new ChatDispatchResult(res.content(), res.promptTokens(),
-        res.completionTokens(), res.totalTokens());
+    // OPENAI / ALIBABA / SELF_HOSTED：多 key 轮询 + 顺序故障转移
+    return withOpenAiCompatibleFailover(provider,
+        client -> {
+          OpenAiCompatibleClient.ChatResult res = client.chatWithUsage(model, systemPrompt, userPrompt);
+          return new ChatDispatchResult(res.content(), res.promptTokens(),
+              res.completionTokens(), res.totalTokens());
+        });
   }
 
   // ── 向量分发 ────────────────────────────────────
@@ -79,21 +101,92 @@ public class StubAiClient implements AiClient {
       BaiduAiClient.EmbeddingResult res = baiduClient.embeddingWithUsage(model, text);
       return new EmbeddingDispatchResult(res.vector(), res.promptTokens(), res.totalTokens());
     }
-    OpenAiCompatibleClient client = resolveOpenAiClient(provider);
-    OpenAiCompatibleClient.EmbeddingResult res = client.embeddingWithUsage(model, text);
-    return new EmbeddingDispatchResult(res.vector(), res.promptTokens(), res.totalTokens());
+    return withOpenAiCompatibleFailover(provider,
+        client -> {
+          OpenAiCompatibleClient.EmbeddingResult res = client.embeddingWithUsage(model, text);
+          return new EmbeddingDispatchResult(res.vector(), res.promptTokens(), res.totalTokens());
+        });
+  }
+
+  private <T> T withOpenAiCompatibleFailover(
+      AiProviderType provider,
+      ThrowingClientFunction<T> operation) throws Exception {
+    List<String> keys = resolveProviderKeyPool(provider);
+    if (keys.isEmpty()) {
+      return operation.apply(resolveOpenAiClient(provider));
+    }
+    int start = Math.floorMod(
+        providerKeyCursor.get(provider).getAndIncrement(),
+        keys.size());
+    Exception lastEx = null;
+    for (int offset = 0; offset < keys.size(); offset++) {
+      String key = keys.get((start + offset) % keys.size());
+      if (key == null || key.isBlank()) {
+        continue;
+      }
+      try {
+        return operation.apply(resolveOpenAiClient(provider, key));
+      } catch (Exception ex) {
+        lastEx = ex;
+      }
+    }
+    if (lastEx != null) {
+      throw lastEx;
+    }
+    throw new IllegalStateException("No available api key for provider: " + provider);
+  }
+
+  private List<String> resolveProviderKeyPool(AiProviderType provider) {
+    List<String> keys = switch (provider) {
+      case OPENAI -> props.getOpenAi().getApiKeys();
+      case ALIBABA -> props.getAlibaba().getApiKeys();
+      case SELF_HOSTED -> props.getSelfHosted().getApiKeys();
+      // BAIDU 当前仍基于 apiKey + secretKey 配对认证，不在此列表分流
+      default -> Collections.emptyList();
+    };
+    if (keys == null || keys.isEmpty()) {
+      return Collections.emptyList();
+    }
+    return keys.stream().filter(Objects::nonNull).map(String::trim).filter(s -> !s.isBlank()).toList();
+  }
+
+  @FunctionalInterface
+  private interface ThrowingClientFunction<T> {
+    T apply(OpenAiCompatibleClient client) throws Exception;
   }
 
   // ── Token 用量统一上报（消除 3 处 finally 块的重复） ──────
 
   private void recordUsage(String requestType, String scene, AiProviderType provider,
       String model, int promptTokens, int completionTokens, long latencyMs,
-      boolean estimated, boolean success) {
-    tokenUsageService.record(
-        requestType, provider.name(), model, scene,
-        promptTokens, completionTokens, promptTokens + completionTokens,
-        latencyMs, estimated, success,
-        currentUserService.getCurrentUserId());
+      boolean estimated, boolean success,
+      String requestPayload, String responsePayload,
+      Integer httpStatus, String errorCode, String errorMessage) {
+    AiTraceContext.AiTraceMeta traceMeta = AiTraceContext.current();
+    tokenUsageService.record(AiTokenUsageService.UsageRecordCommand.builder()
+        .traceId(UUID.randomUUID().toString().replace("-", ""))
+        .requestType(requestType)
+        .provider(provider == null ? "UNKNOWN" : provider.name())
+        .modelName(model)
+        .scene(scene)
+        .promptTokens(promptTokens)
+        .completionTokens(completionTokens)
+        .totalTokens(promptTokens + completionTokens)
+        .latencyMs(latencyMs)
+        .estimated(estimated)
+        .success(success)
+        .knowledgeBaseId(traceMeta == null ? null : traceMeta.knowledgeBaseId())
+        .knowledgeDocumentId(traceMeta == null ? null : traceMeta.knowledgeDocumentId())
+        .sectionId(traceMeta == null ? null : traceMeta.sectionId())
+        .aiTaskId(traceMeta == null ? null : traceMeta.aiTaskId())
+        .retryCount(traceMeta == null || traceMeta.retryCount() == null ? 0 : traceMeta.retryCount())
+        .httpStatus(httpStatus)
+        .errorCode(truncate(errorCode, 64))
+        .errorMessage(truncate(errorMessage, 2000))
+        .requestPayload(truncate(requestPayload, 8000))
+        .responsePayload(truncate(responsePayload, 12000))
+        .userId(currentUserService.getCurrentUserId())
+        .build());
   }
 
   // ══════════════════════════════════════════════════
@@ -111,14 +204,21 @@ public class StubAiClient implements AiClient {
     int promptTokens = estimateTextTokens(systemPrompt) + estimateTextTokens(userPrompt);
     int completionTokens = 0;
     boolean estimated = true;
+    String requestPayload = buildChatRequestPreview(systemPrompt, userPrompt);
+    String responsePayload = null;
+    Integer httpStatus = null;
+    String errorCode = null;
+    String errorMessage = null;
     try {
       if (provider == AiProviderType.MOCK) {
         // MOCK 模式：原样回显用户输入
         result = "[MOCK-CHAT]\n" + userPrompt;
         completionTokens = estimateTextTokens(result);
+        responsePayload = truncate(result, 8000);
       } else {
         ChatDispatchResult res = dispatchChat(provider, model, systemPrompt, userPrompt);
         result = res.content();
+        responsePayload = truncate(result, 8000);
         UsageTokens tokens = mergeUsage(res.promptTokens(), res.completionTokens(),
             res.totalTokens(), systemPrompt, userPrompt, result);
         promptTokens = tokens.prompt();
@@ -130,10 +230,16 @@ public class StubAiClient implements AiClient {
       success = false;
       result = "[AI调用失败，使用兜底结果]\n" + userPrompt;
       completionTokens = estimateTextTokens(result);
+      responsePayload = truncate(result, 8000);
+      errorMessage = ex.getMessage();
+      HttpErrorInfo info = parseHttpError(ex);
+      httpStatus = info.httpStatus();
+      errorCode = info.errorCode();
       return result;
     } finally {
       recordUsage("CHAT", "chat", provider, model, promptTokens, completionTokens,
-          Duration.between(start, Instant.now()).toMillis(), estimated, success);
+          Duration.between(start, Instant.now()).toMillis(), estimated, success,
+          requestPayload, responsePayload, httpStatus, errorCode, errorMessage);
     }
   }
 
@@ -147,9 +253,16 @@ public class StubAiClient implements AiClient {
     int completionTokens = 0;
     boolean success = true;
     boolean estimated = true;
+    String requestPayload = buildEmbeddingRequestPreview(text);
+    String responsePayload = null;
+    Integer httpStatus = null;
+    String errorCode = null;
+    String errorMessage = null;
     try {
       if (provider == AiProviderType.MOCK) {
-        return fallbackEmbedding(text);
+        List<Double> vector = fallbackEmbedding(text);
+        responsePayload = "{\"vectorDim\":" + vector.size() + ",\"fallback\":true}";
+        return vector;
       }
       EmbeddingDispatchResult res = dispatchEmbedding(provider, model, text);
       UsageTokens tokens = mergeUsage(res.promptTokens(), 0,
@@ -157,13 +270,21 @@ public class StubAiClient implements AiClient {
       promptTokens = tokens.prompt();
       completionTokens = tokens.completion();
       estimated = tokens.estimated();
+      responsePayload = "{\"vectorDim\":" + (res.vector() == null ? 0 : res.vector().size()) + "}";
       return res.vector();
     } catch (Exception ex) {
       success = false;
-      return fallbackEmbedding(text);
+      errorMessage = ex.getMessage();
+      HttpErrorInfo info = parseHttpError(ex);
+      httpStatus = info.httpStatus();
+      errorCode = info.errorCode();
+      List<Double> vector = fallbackEmbedding(text);
+      responsePayload = "{\"vectorDim\":" + vector.size() + ",\"fallback\":true}";
+      return vector;
     } finally {
       recordUsage("EMBEDDING", "embedding", provider, model, promptTokens, completionTokens,
-          Duration.between(start, Instant.now()).toMillis(), estimated, success);
+          Duration.between(start, Instant.now()).toMillis(), estimated, success,
+          requestPayload, responsePayload, httpStatus, errorCode, errorMessage);
     }
   }
 
@@ -176,6 +297,11 @@ public class StubAiClient implements AiClient {
     int completionTokens = 0;
     boolean success = true;
     boolean estimated = true;
+    String requestPayload = null;
+    String responsePayload = null;
+    Integer httpStatus = null;
+    String errorCode = null;
+    String errorMessage = null;
     try {
       String systemPrompt = """
           你是一个专业的行业文档关键词提取助手。
@@ -197,14 +323,17 @@ public class StubAiClient implements AiClient {
       if (input.length() > 4000) {
         input = input.substring(0, 4000);
       }
+      requestPayload = buildChatRequestPreview(systemPrompt, input);
       promptTokens = estimateTextTokens(systemPrompt) + estimateTextTokens(input);
 
       if (provider == AiProviderType.MOCK) {
         completionTokens = estimateTextTokens("{}");
+        responsePayload = "{}";
         return "{}";
       }
       ChatDispatchResult res = dispatchChat(provider, model, systemPrompt, input);
       String result = res.content();
+      responsePayload = truncate(result, 8000);
       UsageTokens tokens = mergeUsage(res.promptTokens(), res.completionTokens(),
           res.totalTokens(), systemPrompt, input, result);
       promptTokens = tokens.prompt();
@@ -213,11 +342,17 @@ public class StubAiClient implements AiClient {
       return result == null ? "{}" : result.trim();
     } catch (Exception ex) {
       success = false;
+      errorMessage = ex.getMessage();
+      HttpErrorInfo info = parseHttpError(ex);
+      httpStatus = info.httpStatus();
+      errorCode = info.errorCode();
+      responsePayload = "{}";
       return "{}";
     } finally {
       recordUsage("KEYWORD_EXTRACT", "extractKeywordFrequency", provider, model,
           promptTokens, completionTokens,
-          Duration.between(start, Instant.now()).toMillis(), estimated, success);
+          Duration.between(start, Instant.now()).toMillis(), estimated, success,
+          requestPayload, responsePayload, httpStatus, errorCode, errorMessage);
     }
   }
 
@@ -262,6 +397,64 @@ public class StubAiClient implements AiClient {
   }
 
   private record UsageTokens(int prompt, int completion, int total, boolean estimated) {
+  }
+
+  private HttpErrorInfo parseHttpError(Exception ex) {
+    if (ex == null || ex.getMessage() == null) {
+      return new HttpErrorInfo(null, null);
+    }
+    String msg = ex.getMessage();
+    Matcher m = Pattern.compile("AI provider error:\\s*(\\d{3})").matcher(msg);
+    Integer status = null;
+    if (m.find()) {
+      try {
+        status = Integer.parseInt(m.group(1));
+      } catch (NumberFormatException ignored) {
+      }
+    }
+    String code = null;
+    String lower = msg.toLowerCase(Locale.ROOT);
+    if (lower.contains("rate limit")) {
+      code = "RATE_LIMIT";
+    } else if (lower.contains("unauthorized") || lower.contains("invalid api key")) {
+      code = "UNAUTHORIZED";
+    } else if (lower.contains("timeout")) {
+      code = "TIMEOUT";
+    }
+    return new HttpErrorInfo(status, code);
+  }
+
+  private String buildChatRequestPreview(String systemPrompt, String userPrompt) {
+    String sys = truncate(systemPrompt, 2000);
+    String user = truncate(userPrompt, 4000);
+    return "{\"systemPrompt\":" + quoteJson(sys) + ",\"userPrompt\":" + quoteJson(user) + "}";
+  }
+
+  private String buildEmbeddingRequestPreview(String text) {
+    String safe = truncate(text, 4000);
+    return "{\"text\":" + quoteJson(safe) + "}";
+  }
+
+  private String quoteJson(String text) {
+    if (text == null) {
+      return "null";
+    }
+    return "\"" + text
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t") + "\"";
+  }
+
+  private String truncate(String text, int maxLen) {
+    if (text == null) {
+      return null;
+    }
+    if (text.length() <= maxLen) {
+      return text;
+    }
+    return text.substring(0, maxLen);
   }
 
   private List<Double> fallbackEmbedding(String text) {

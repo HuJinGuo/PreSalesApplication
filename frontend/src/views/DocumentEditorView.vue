@@ -13,8 +13,8 @@
         <div class="tree-header">
           <span>章节结构</span>
           <div class="tree-tools">
-            <el-button size="small" @click="showApplyTemplate = true">套用模板</el-button>
-            <el-button size="small" @click="showSaveTemplate = true">保存为模板</el-button>
+            <el-button size="small" @click="openApplyTemplateDialog">套用模板</el-button>
+            <el-button size="small" @click="openSaveTemplateDialog">保存为模板</el-button>
             <el-button size="small" @click="showCreateSection = true">新增章节</el-button>
           </div>
         </div>
@@ -737,7 +737,7 @@ const confirmLeaveIfDirty = async () => {
 }
 
 const load = async () => {
-  const docId = Number(route.params.id)
+  const docId = String(route.params.id)
   const docRes = await api.getDocument(docId)
   document.value = docRes.data
   const treeRes = await api.listSectionTree(docId)
@@ -820,7 +820,7 @@ const createSectionAt = async (anchor: any, mode: 'child' | 'sibling') => {
     sortIndex: maxSort + 1
   }
   try {
-    const { data } = await api.createSection(Number(route.params.id), payload)
+    const { data } = await api.createSection(String(route.params.id), payload)
     ElMessage.success('章节创建成功')
     await load()
     const created = findNodeAndSiblings(data.id)
@@ -866,7 +866,7 @@ const deleteSectionNode = async (node: any) => {
 }
 const createSection = async () => {
   try {
-    const docId = Number(route.params.id)
+    const docId = String(route.params.id)
     await api.createSection(docId, sectionForm)
     ElMessage.success('章节创建成功')
     showCreateSection.value = false
@@ -1032,8 +1032,22 @@ const refresh = async () => {
   if (!(await confirmLeaveIfDirty())) return
   await load()
 }
+const openApplyTemplateDialog = async () => {
+  const tplRes = await api.listSectionTemplates()
+  templates.value = tplRes.data || []
+  templateApplyForm.templateId = undefined
+  showApplyTemplate.value = true
+}
+const openSaveTemplateDialog = () => {
+  templateSaveForm.name = ''
+  templateSaveForm.description = ''
+  showSaveTemplate.value = true
+}
 const applyTemplate = async () => {
-  if (!templateApplyForm.templateId || !document.value) return
+  if (!templateApplyForm.templateId || !document.value) {
+    ElMessage.warning('请先选择模板')
+    return
+  }
   await api.applySectionTemplate(document.value.id, templateApplyForm.templateId, { clearExisting: false })
   ElMessage.success('模板已套用')
   showApplyTemplate.value = false

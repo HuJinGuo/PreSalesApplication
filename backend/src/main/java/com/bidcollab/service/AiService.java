@@ -1,6 +1,7 @@
 package com.bidcollab.service;
 
 import com.bidcollab.ai.AiClient;
+import com.bidcollab.ai.AiTraceContext;
 import com.bidcollab.dto.AiAssistantAskRequest;
 import com.bidcollab.dto.AiAssistantAskResponse;
 import com.bidcollab.dto.AiAssistantCitation;
@@ -105,7 +106,9 @@ public class AiService {
           + "\n\n【引用片段】\n" + (hasCitations ? citationContext : "(当前章节暂无引用片段)")
           + "\n\n【原章节（仅兜底参考）】\n" + sourceVersion.getContent()
           + "\n\n请输出改写后的章节正文（HTML）。";
-      String output = aiClient.chat(systemPrompt, userPrompt);
+      AiTraceContext.AiTraceMeta meta = new AiTraceContext.AiTraceMeta(
+          null, null, section.getId(), task.getId(), 0, "section-rewrite");
+      String output = AiTraceContext.with(meta, () -> aiClient.chat(systemPrompt, userPrompt));
       SectionVersionCreateRequest versionRequest = new SectionVersionCreateRequest();
       versionRequest.setContent(output);
       versionRequest.setSummary("AI改写");
@@ -286,7 +289,9 @@ public class AiService {
           """;
       // 用户提示词：包含原始问题和检索到的知识片段
       String userPrompt = "【用户问题】\n" + request.getQuery() + "\n\n【知识片段】\n" + context;
-      answer = aiClient.chat(systemPrompt, userPrompt);
+      AiTraceContext.AiTraceMeta meta = new AiTraceContext.AiTraceMeta(
+          request.getKnowledgeBaseId(), null, null, null, 0, "assistant-ask");
+      answer = AiTraceContext.with(meta, () -> aiClient.chat(systemPrompt, userPrompt));
     } catch (Exception ex) {
       // LLM 调用异常时返回兜底文案，不影响整体流程
       answer = "AI回答失败，请稍后重试。";

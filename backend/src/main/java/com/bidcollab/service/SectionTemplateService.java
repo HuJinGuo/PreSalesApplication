@@ -19,10 +19,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@Slf4j
 public class SectionTemplateService {
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -43,7 +45,7 @@ public class SectionTemplateService {
 
   public List<SectionTemplateResponse> list() {
     return sectionTemplateRepository.findAllByOrderByCreatedAtDesc().stream()
-        .map(this::toResponse)
+        .map(this::toResponseSafe)
         .collect(Collectors.toList());
   }
 
@@ -150,12 +152,37 @@ public class SectionTemplateService {
     }
   }
 
+  /**
+   * 模板列表需要容错：历史脏数据不应影响整个列表查询。
+   */
+  private List<SectionTemplateNode> readStructureSafely(String structureJson, Long templateId) {
+    if (structureJson == null || structureJson.isBlank()) {
+      return List.of();
+    }
+    try {
+      return MAPPER.readValue(structureJson, new TypeReference<List<SectionTemplateNode>>() {});
+    } catch (Exception ex) {
+      log.warn("Failed to parse section template structure, templateId={}", templateId, ex);
+      return List.of();
+    }
+  }
+
   private SectionTemplateResponse toResponse(SectionTemplate template) {
     return SectionTemplateResponse.builder()
         .id(template.getId())
         .name(template.getName())
         .description(template.getDescription())
         .structure(readStructure(template.getStructureJson()))
+        .createdAt(template.getCreatedAt())
+        .build();
+  }
+
+  private SectionTemplateResponse toResponseSafe(SectionTemplate template) {
+    return SectionTemplateResponse.builder()
+        .id(template.getId())
+        .name(template.getName())
+        .description(template.getDescription())
+        .structure(readStructureSafely(template.getStructureJson(), template.getId()))
         .createdAt(template.getCreatedAt())
         .build();
   }

@@ -34,7 +34,11 @@
 
       <el-table :data="documents" style="margin-top: 12px">
         <el-table-column prop="id" label="文档ID" width="100" />
-        <el-table-column prop="title" label="标题" />
+        <el-table-column prop="title" label="标题">
+          <template #default="scope">
+            <el-button link type="primary" @click.stop="openDocumentTrace(scope.row)">{{ scope.row.title }}</el-button>
+          </template>
+        </el-table-column>
         <el-table-column prop="sourceType" label="来源" width="120" />
         <el-table-column prop="fileType" label="文件类型" width="120" />
         <el-table-column label="索引状态" width="220">
@@ -65,8 +69,9 @@
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140">
+        <el-table-column label="操作" width="220">
           <template #default="scope">
+            <el-button size="small" @click.stop="openDocumentTrace(scope.row)">调用记录</el-button>
             <el-button size="small" type="danger" @click="removeDocument(scope.row)">
               {{ scope.row.indexStatus === 'RUNNING' || scope.row.indexStatus === 'PENDING' ? '取消并删除' : '删除' }}
             </el-button>
@@ -121,6 +126,70 @@
         <el-button type="primary" @click="bindSelectedPack">引入</el-button>
       </div>
     </el-dialog>
+
+    <el-dialog v-model="showTraceDialog" :title="`调用记录：${traceTargetDoc?.title || ''}`" width="980px">
+      <div class="trace-summary" v-if="traceTargetDoc">
+        <el-tag :type="indexStatusTagType(traceTargetDoc.indexStatus)">{{ traceTargetDoc.indexStatus || 'SUCCESS' }}</el-tag>
+        <span class="index-message" :title="traceTargetDoc.indexMessage || ''">{{ traceTargetDoc.indexMessage || '索引完成' }}</span>
+      </div>
+      <el-table :data="traceRecords" height="420" v-loading="traceLoading">
+        <el-table-column label="状态" width="90">
+          <template #default="scope">
+            <el-tag :type="scope.row.success ? 'success' : 'danger'" size="small">{{ scope.row.success ? '成功' : '失败' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="createdAt" label="时间" width="180" />
+        <!-- <el-table-column prop="requestType" label="类型" width="120" />
+        <el-table-column prop="provider" label="服务商" width="120" /> -->
+        <el-table-column prop="modelName" label="模型" min-width="180" />
+        <el-table-column prop="scene" label="场景" width="150" />
+        <el-table-column prop="totalTokens" label="总Token" width="110" />
+        <el-table-column prop="latencyMs" label="耗时(ms)" width="110" />
+        
+        <el-table-column label="错误信息" min-width="180" show-overflow-tooltip>
+          <template #default="scope">{{ scope.row.errorMessage || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="110" fixed="right">
+          <template #default="scope">
+            <el-button link type="primary" @click="openTraceDetail(scope.row)">详情</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="pager-wrap">
+        <el-pagination
+          background
+          layout="total, prev, pager, next"
+          :total="traceTotal"
+          :current-page="tracePage"
+          :page-size="traceSize"
+          @current-change="onTracePageChange"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="showTraceDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showTraceDetailDialog" title="调用详情" width="860px">
+      <el-descriptions :column="2" border size="small" v-if="traceDetail">
+        <el-descriptions-item label="TraceID">{{ traceDetail.traceId || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="时间">{{ traceDetail.createdAt ? new Date(traceDetail.createdAt).toLocaleString() : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="服务商/模型">{{ `${traceDetail.provider || '-'} / ${traceDetail.modelName || '-'}` }}</el-descriptions-item>
+        <el-descriptions-item label="场景">{{ traceDetail.scene || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Token(入/出/总)">{{ `${traceDetail.promptTokens || 0} / ${traceDetail.completionTokens || 0} / ${traceDetail.totalTokens || 0}` }}</el-descriptions-item>
+        <el-descriptions-item label="耗时(ms)">{{ traceDetail.latencyMs || 0 }}</el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag :type="traceDetail.success ? 'success' : 'danger'" size="small">{{ traceDetail.success ? '成功' : '失败' }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="HTTP状态">{{ traceDetail.httpStatus ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="错误信息" :span="2"><pre class="detail-pre">{{ traceDetail.errorMessage || '-' }}</pre></el-descriptions-item>
+        <el-descriptions-item label="请求摘要" :span="2"><pre class="detail-pre">{{ traceDetail.requestPayload || '-' }}</pre></el-descriptions-item>
+        <el-descriptions-item label="响应摘要" :span="2"><pre class="detail-pre">{{ traceDetail.responsePayload || '-' }}</pre></el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button @click="showTraceDetailDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -143,6 +212,15 @@ const packToAdd = ref<number>()
 const packPriority = ref(100)
 const packBindingLoading = ref(false)
 const pollingTimer = ref<number | null>(null)
+const showTraceDialog = ref(false)
+const showTraceDetailDialog = ref(false)
+const traceTargetDoc = ref<any>(null)
+const traceRecords = ref<any[]>([])
+const traceDetail = ref<any>(null)
+const traceLoading = ref(false)
+const tracePage = ref(1)
+const traceSize = ref(20)
+const traceTotal = ref(0)
 
 const kbForm = reactive({ name: '', description: '' })
 const manualForm = reactive({ title: '', content: '' })
@@ -280,6 +358,46 @@ const removeBinding = async (row: any) => {
   await loadPackBindings()
 }
 
+const loadDocumentTraces = async () => {
+  if (!traceTargetDoc.value) return
+  traceLoading.value = true
+  try {
+    const { data } = await api.getAiTokenUsageRecords({
+      page: tracePage.value,
+      size: traceSize.value,
+      knowledgeDocumentId: traceTargetDoc.value.id
+    })
+    traceRecords.value = (data?.records || []).map((item: any) => ({
+      ...item,
+      createdAt: item.createdAt ? new Date(item.createdAt).toLocaleString() : '-'
+    }))
+    traceTotal.value = Number(data?.total || 0)
+  } finally {
+    traceLoading.value = false
+  }
+}
+
+const openDocumentTrace = async (row: any) => {
+  if (!row?.id) return
+  traceTargetDoc.value = row
+  tracePage.value = 1
+  showTraceDialog.value = true
+  await loadDocumentTraces()
+}
+
+const onTracePageChange = async (page: number) => {
+  tracePage.value = page
+  await loadDocumentTraces()
+}
+
+const openTraceDetail = async (row: any) => {
+  const id = Number(row?.id || 0)
+  if (!id) return
+  const { data } = await api.getAiTokenUsageRecordDetail(id)
+  traceDetail.value = data
+  showTraceDetailDialog.value = true
+}
+
 const hasRunningIndexTask = () =>
   documents.value.some((d: any) => d.indexStatus === 'PENDING' || d.indexStatus === 'RUNNING')
 
@@ -353,5 +471,26 @@ onBeforeUnmount(() => stopIndexPolling())
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.trace-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.pager-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.detail-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
 }
 </style>

@@ -171,7 +171,8 @@ import {
   User,
   UserFilled,
   Avatar,
-  DataAnalysis
+  DataAnalysis,
+  Monitor
 } from '@element-plus/icons-vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -212,6 +213,7 @@ const activePath = computed(() => route.path)
 const navMenus = ref<any[]>([])
 const fallbackMenus = [
   { id: 1, title: '项目管理', path: '/projects', icon: 'Folder', children: [] },
+  { id: 100, title: '流程编排中心', path: '/workflows', icon: 'Monitor', children: [] },
   {
     id: 2,
     title: '知识中心',
@@ -240,6 +242,7 @@ const fallbackMenus = [
 ]
 const iconMap: Record<string, any> = {
   Folder,
+  Monitor,
   Collection,
   Document,
   Tickets,

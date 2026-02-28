@@ -2,6 +2,10 @@ package com.bidcollab.controller;
 
 import com.bidcollab.dto.DictionaryBatchUpsertRequest;
 import com.bidcollab.dto.DictionaryBatchUpsertResponse;
+import com.bidcollab.dto.DomainCategoryRelationRequest;
+import com.bidcollab.dto.DomainCategoryRelationResponse;
+import com.bidcollab.dto.DomainCategoryRequest;
+import com.bidcollab.dto.DomainCategoryResponse;
 import com.bidcollab.dto.DictionaryEntryRequest;
 import com.bidcollab.dto.DictionaryEntryResponse;
 import com.bidcollab.dto.DictionaryPackRequest;
@@ -31,6 +35,49 @@ public class DomainLexiconController {
 
   public DomainLexiconController(DomainLexiconService service) {
     this.service = service;
+  }
+
+  @GetMapping("/categories")
+  public List<DomainCategoryResponse> listCategories(@RequestParam(value = "activeOnly", defaultValue = "false") boolean activeOnly) {
+    return service.listCategories(activeOnly);
+  }
+
+  @PostMapping("/categories")
+  public DomainCategoryResponse createCategory(@Valid @RequestBody DomainCategoryRequest request) {
+    return service.createCategory(request);
+  }
+
+  @PutMapping("/categories/{categoryId}")
+  public DomainCategoryResponse updateCategory(@PathVariable("categoryId") Long categoryId,
+      @Valid @RequestBody DomainCategoryRequest request) {
+    return service.updateCategory(categoryId, request);
+  }
+
+  @DeleteMapping("/categories/{categoryId}")
+  public void deleteCategory(@PathVariable("categoryId") Long categoryId) {
+    service.deleteCategory(categoryId);
+  }
+
+  @GetMapping("/category-relations")
+  public List<DomainCategoryRelationResponse> listCategoryRelations(
+      @RequestParam(value = "activeOnly", defaultValue = "false") boolean activeOnly) {
+    return service.listCategoryRelations(activeOnly);
+  }
+
+  @PostMapping("/category-relations")
+  public DomainCategoryRelationResponse createCategoryRelation(@Valid @RequestBody DomainCategoryRelationRequest request) {
+    return service.createCategoryRelation(request);
+  }
+
+  @PutMapping("/category-relations/{relationId}")
+  public DomainCategoryRelationResponse updateCategoryRelation(@PathVariable("relationId") Long relationId,
+      @Valid @RequestBody DomainCategoryRelationRequest request) {
+    return service.updateCategoryRelation(relationId, request);
+  }
+
+  @DeleteMapping("/category-relations/{relationId}")
+  public void deleteCategoryRelation(@PathVariable("relationId") Long relationId) {
+    service.deleteCategoryRelation(relationId);
   }
 
   // ===== 词典中心（全局词典包） =====

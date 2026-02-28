@@ -9,7 +9,9 @@ import lombok.Data;
 public class KnowledgeLexiconResponse {
   private Long id;
   private Long knowledgeBaseId;
+  private Long categoryId;
   private String category;
+  private String categoryName;
   private String term;
   private String standardTerm;
   private Boolean enabled;

@@ -13,55 +13,55 @@ export const api = {
   createProject(data: any) {
     return http.post('/projects', data)
   },
-  getProject(id: number) {
+  getProject(id: string | number) {
     return http.get(`/projects/${id}`)
   },
-  updateProject(id: number, data: any) {
+  updateProject(id: string | number, data: any) {
     return http.put(`/projects/${id}`, data)
   },
-  listDocuments(projectId: number) {
+  listDocuments(projectId: string | number) {
     return http.get(`/projects/${projectId}/documents`)
   },
-  createDocument(projectId: number, data: any) {
+  createDocument(projectId: string | number, data: any) {
     return http.post(`/projects/${projectId}/documents`, data)
   },
-  getDocument(id: number) {
+  getDocument(id: string | number) {
     return http.get(`/documents/${id}`)
   },
-  deleteDocument(id: number) {
+  deleteDocument(id: string | number) {
     return http.delete(`/documents/${id}`)
   },
-  listSectionTree(documentId: number) {
+  listSectionTree(documentId: string | number) {
     return http.get(`/documents/${documentId}/sections/tree`)
   },
-  createSection(documentId: number, data: any) {
+  createSection(documentId: string | number, data: any) {
     return http.post(`/documents/${documentId}/sections`, data)
   },
-  updateSection(id: number, data: any) {
+  updateSection(id: string | number, data: any) {
     return http.put(`/sections/${id}`, data)
   },
-  moveSection(id: number, data: any) {
+  moveSection(id: string | number, data: any) {
     return http.post(`/sections/${id}/move`, data)
   },
-  deleteSection(id: number) {
+  deleteSection(id: string | number) {
     return http.delete(`/sections/${id}`)
   },
-  lockSection(id: number) {
+  lockSection(id: string | number) {
     return http.post(`/sections/${id}/lock`)
   },
-  unlockSection(id: number) {
+  unlockSection(id: string | number) {
     return http.post(`/sections/${id}/unlock`)
   },
-  listVersions(sectionId: number) {
+  listVersions(sectionId: string | number) {
     return http.get(`/sections/${sectionId}/versions`)
   },
-  getVersion(sectionId: number, versionId: number) {
+  getVersion(sectionId: string | number, versionId: string | number) {
     return http.get(`/sections/${sectionId}/versions/${versionId}`)
   },
-  createVersion(sectionId: number, data: any) {
+  createVersion(sectionId: string | number, data: any) {
     return http.post(`/sections/${sectionId}/versions`, data)
   },
-  listSectionChunkRefs(sectionId: number) {
+  listSectionChunkRefs(sectionId: string | number) {
     return http.get(`/sections/${sectionId}/chunk-refs`)
   },
   listSectionTemplates() {
@@ -70,31 +70,31 @@ export const api = {
   createSectionTemplateFromDocument(data: any) {
     return http.post('/section-templates/from-document', data)
   },
-  applySectionTemplate(documentId: number, templateId: number, data: any = {}) {
+  applySectionTemplate(documentId: string | number, templateId: string | number, data: any = {}) {
     return http.post(`/documents/${documentId}/section-templates/${templateId}/apply`, data)
   },
-  createAsset(sectionId: number, data: any) {
+  createAsset(sectionId: string | number, data: any) {
     return http.post(`/sections/${sectionId}/asset`, data)
   },
   searchAssets(params: any) {
     return http.get('/assets/search', { params })
   },
-  reuseSection(parentSectionId: number, data: any) {
+  reuseSection(parentSectionId: string | number, data: any) {
     return http.post(`/sections/${parentSectionId}/reuse`, data)
   },
-  listReuseTrace(sectionId: number) {
+  listReuseTrace(sectionId: string | number) {
     return http.get(`/sections/${sectionId}/reuse-trace`)
   },
-  submitReview(sectionId: number, data: any) {
+  submitReview(sectionId: string | number, data: any) {
     return http.post(`/sections/${sectionId}/review/submit`, data)
   },
-  approveReview(sectionId: number, data: any) {
+  approveReview(sectionId: string | number, data: any) {
     return http.post(`/sections/${sectionId}/review/approve`, data)
   },
-  rejectReview(sectionId: number, data: any) {
+  rejectReview(sectionId: string | number, data: any) {
     return http.post(`/sections/${sectionId}/review/reject`, data)
   },
-  listReviews(sectionId: number) {
+  listReviews(sectionId: string | number) {
     return http.get(`/sections/${sectionId}/reviews`)
   },
   aiRewrite(data: any) {
@@ -112,13 +112,16 @@ export const api = {
   getAiTokenUsageRecords(params?: any) {
     return http.get('/ai/token-usage/records', { params })
   },
+  getAiTokenUsageRecordDetail(id: number) {
+    return http.get(`/ai/token-usage/records/${id}`)
+  },
   getAiTask(id: number) {
     return http.get(`/ai/tasks/${id}`)
   },
-  exportDocument(documentId: number, data: any) {
+  exportDocument(documentId: string | number, data: any) {
     return http.post(`/documents/${documentId}/export`, data)
   },
-  listExports(documentId: number) {
+  listExports(documentId: string | number) {
     return http.get(`/documents/${documentId}/exports`)
   },
   downloadExport(exportId: number) {
@@ -160,6 +163,30 @@ export const api = {
   },
   deleteDomainLexicon(lexiconId: number) {
     return http.delete(`/domain-lexicons/${lexiconId}`)
+  },
+  listDomainCategories(params: any = {}) {
+    return http.get('/domain-lexicons/categories', { params })
+  },
+  createDomainCategory(data: any) {
+    return http.post('/domain-lexicons/categories', data)
+  },
+  updateDomainCategory(categoryId: number, data: any) {
+    return http.put(`/domain-lexicons/categories/${categoryId}`, data)
+  },
+  deleteDomainCategory(categoryId: number) {
+    return http.delete(`/domain-lexicons/categories/${categoryId}`)
+  },
+  listDomainCategoryRelations(params: any = {}) {
+    return http.get('/domain-lexicons/category-relations', { params })
+  },
+  createDomainCategoryRelation(data: any) {
+    return http.post('/domain-lexicons/category-relations', data)
+  },
+  updateDomainCategoryRelation(relationId: number, data: any) {
+    return http.put(`/domain-lexicons/category-relations/${relationId}`, data)
+  },
+  deleteDomainCategoryRelation(relationId: number) {
+    return http.delete(`/domain-lexicons/category-relations/${relationId}`)
   },
   listDictionaryPacks() {
     return http.get('/domain-lexicons/packs')

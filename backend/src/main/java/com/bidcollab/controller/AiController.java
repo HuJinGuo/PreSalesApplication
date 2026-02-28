@@ -6,6 +6,7 @@ import com.bidcollab.dto.AiDocumentAutoWriteRequest;
 import com.bidcollab.dto.AiRewriteRequest;
 import com.bidcollab.dto.AiTaskResponse;
 import com.bidcollab.dto.AiTokenUsageDailyResponse;
+import com.bidcollab.dto.AiTokenUsageRecordDetailResponse;
 import com.bidcollab.dto.AiTokenUsageRecordPageResponse;
 import com.bidcollab.service.AiService;
 import com.bidcollab.service.AiTokenUsageService;
@@ -62,7 +63,15 @@ public class AiController {
       @RequestParam(name = "startDate", required = false) LocalDate startDate,
       @RequestParam(name = "endDate", required = false) LocalDate endDate,
       @RequestParam(name = "page", required = false, defaultValue = "1") Integer page,
-      @RequestParam(name = "size", required = false, defaultValue = "20") Integer size) {
-    return aiTokenUsageService.records(startDate, endDate, page, size);
+      @RequestParam(name = "size", required = false, defaultValue = "20") Integer size,
+      @RequestParam(name = "knowledgeBaseId", required = false) Long knowledgeBaseId,
+      @RequestParam(name = "knowledgeDocumentId", required = false) Long knowledgeDocumentId,
+      @RequestParam(name = "success", required = false) Boolean success) {
+    return aiTokenUsageService.records(startDate, endDate, page, size, knowledgeBaseId, knowledgeDocumentId, success);
+  }
+
+  @GetMapping("/token-usage/records/{id}")
+  public AiTokenUsageRecordDetailResponse tokenUsageRecordDetail(@PathVariable("id") Long id) {
+    return aiTokenUsageService.recordDetail(id);
   }
 }

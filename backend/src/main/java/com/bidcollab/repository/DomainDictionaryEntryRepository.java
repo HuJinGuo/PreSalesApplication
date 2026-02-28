@@ -11,7 +11,11 @@ public interface DomainDictionaryEntryRepository extends JpaRepository<DomainDic
 
   List<DomainDictionaryEntry> findByPackIdInAndEnabledTrue(Collection<Long> packIds);
 
-  Optional<DomainDictionaryEntry> findByPackIdAndCategoryAndTerm(Long packId, String category, String term);
+  Optional<DomainDictionaryEntry> findByPackIdAndCategoryRefIdAndTerm(Long packId, Long categoryId, String term);
+
+  boolean existsByCategoryRefId(Long categoryId);
+
+  boolean existsByCategoryIgnoreCase(String category);
 
   void deleteByPackId(Long packId);
 }

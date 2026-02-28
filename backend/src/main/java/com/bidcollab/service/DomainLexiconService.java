@@ -2,6 +2,10 @@ package com.bidcollab.service;
 
 import com.bidcollab.dto.DictionaryBatchUpsertRequest;
 import com.bidcollab.dto.DictionaryBatchUpsertResponse;
+import com.bidcollab.dto.DomainCategoryRelationRequest;
+import com.bidcollab.dto.DomainCategoryRelationResponse;
+import com.bidcollab.dto.DomainCategoryRequest;
+import com.bidcollab.dto.DomainCategoryResponse;
 import com.bidcollab.dto.DictionaryEntryRequest;
 import com.bidcollab.dto.DictionaryEntryResponse;
 import com.bidcollab.dto.DictionaryPackRequest;
@@ -11,6 +15,8 @@ import com.bidcollab.dto.DomainLexiconUpdateRequest;
 import com.bidcollab.dto.KnowledgeBaseDictionaryPackBindRequest;
 import com.bidcollab.dto.KnowledgeBaseDictionaryPackResponse;
 import com.bidcollab.dto.KnowledgeLexiconResponse;
+import com.bidcollab.entity.DomainCategory;
+import com.bidcollab.entity.DomainCategoryRelation;
 import com.bidcollab.entity.DomainDictionaryEntry;
 import com.bidcollab.entity.DomainDictionaryPack;
 import com.bidcollab.entity.KnowledgeBase;
@@ -18,6 +24,8 @@ import com.bidcollab.entity.KnowledgeBaseDictionaryPack;
 import com.bidcollab.entity.KnowledgeBaseDomainLexicon;
 import com.bidcollab.repository.DomainDictionaryEntryRepository;
 import com.bidcollab.repository.DomainDictionaryPackRepository;
+import com.bidcollab.repository.DomainCategoryRelationRepository;
+import com.bidcollab.repository.DomainCategoryRepository;
 import com.bidcollab.repository.KnowledgeBaseDictionaryPackRepository;
 import com.bidcollab.repository.KnowledgeBaseDomainLexiconRepository;
 import com.bidcollab.repository.KnowledgeBaseRepository;
@@ -44,6 +52,8 @@ public class DomainLexiconService {
   private final CurrentUserService currentUserService;
   private final DomainDictionaryPackRepository packRepository;
   private final DomainDictionaryEntryRepository entryRepository;
+  private final DomainCategoryRepository categoryRepository;
+  private final DomainCategoryRelationRepository categoryRelationRepository;
   private final KnowledgeBaseDictionaryPackRepository kbPackRepository;
   private final ObjectMapper objectMapper;
 
@@ -53,6 +63,8 @@ public class DomainLexiconService {
       CurrentUserService currentUserService,
       DomainDictionaryPackRepository packRepository,
       DomainDictionaryEntryRepository entryRepository,
+      DomainCategoryRepository categoryRepository,
+      DomainCategoryRelationRepository categoryRelationRepository,
       KnowledgeBaseDictionaryPackRepository kbPackRepository,
       ObjectMapper objectMapper) {
     this.kbLexiconRepository = kbLexiconRepository;
@@ -60,6 +72,8 @@ public class DomainLexiconService {
     this.currentUserService = currentUserService;
     this.packRepository = packRepository;
     this.entryRepository = entryRepository;
+    this.categoryRepository = categoryRepository;
+    this.categoryRelationRepository = categoryRelationRepository;
     this.kbPackRepository = kbPackRepository;
     this.objectMapper = objectMapper;
   }
@@ -75,12 +89,14 @@ public class DomainLexiconService {
   @Transactional
   public KnowledgeLexiconResponse upsert(DomainLexiconUpsertRequest request) {
     KnowledgeBase kb = baseRepository.findById(request.getKnowledgeBaseId()).orElseThrow(EntityNotFoundException::new);
-    String category = normalizeCategory(request.getCategory());
+    DomainCategory categoryRef = resolveCategory(request.getCategoryId(), request.getCategory());
+    String category = categoryRef.getCode();
     String term = normalizeTerm(request.getTerm());
     KnowledgeBaseDomainLexicon lexicon = kbLexiconRepository
-        .findByKnowledgeBaseIdAndCategoryAndTerm(kb.getId(), category, term)
+        .findByKnowledgeBaseIdAndCategoryRefIdAndTerm(kb.getId(), categoryRef.getId(), term)
         .orElseGet(() -> KnowledgeBaseDomainLexicon.builder()
             .knowledgeBase(kb)
+            .categoryRef(categoryRef)
             .category(category)
             .term(term)
             .enabled(Boolean.TRUE)
@@ -97,18 +113,22 @@ public class DomainLexiconService {
 
   @Transactional
   public KnowledgeLexiconResponse update(Long lexiconId, DomainLexiconUpdateRequest request) {
-    KnowledgeBaseDomainLexicon lexicon = kbLexiconRepository.findById(lexiconId).orElseThrow(EntityNotFoundException::new);
+    KnowledgeBaseDomainLexicon lexicon = kbLexiconRepository.findById(lexiconId)
+        .orElseThrow(EntityNotFoundException::new);
     if (!lexicon.getKnowledgeBase().getId().equals(request.getKnowledgeBaseId())) {
       throw new IllegalArgumentException("Lexicon does not belong to knowledge base");
     }
-    String category = normalizeCategory(request.getCategory());
+    DomainCategory categoryRef = resolveCategory(request.getCategoryId(), request.getCategory());
+    String category = categoryRef.getCode();
     String term = normalizeTerm(request.getTerm());
-    kbLexiconRepository.findByKnowledgeBaseIdAndCategoryAndTerm(request.getKnowledgeBaseId(), category, term)
+    kbLexiconRepository
+        .findByKnowledgeBaseIdAndCategoryRefIdAndTerm(request.getKnowledgeBaseId(), categoryRef.getId(), term)
         .ifPresent(existing -> {
           if (!existing.getId().equals(lexiconId)) {
             throw new IllegalArgumentException("Lexicon term already exists in this category");
           }
         });
+    lexicon.setCategoryRef(categoryRef);
     lexicon.setCategory(category);
     lexicon.setTerm(term);
     lexicon.setStandardTerm(normalizeOptional(request.getStandardTerm()));
@@ -121,8 +141,149 @@ public class DomainLexiconService {
 
   @Transactional
   public void delete(Long lexiconId) {
-    KnowledgeBaseDomainLexicon lexicon = kbLexiconRepository.findById(lexiconId).orElseThrow(EntityNotFoundException::new);
+    KnowledgeBaseDomainLexicon lexicon = kbLexiconRepository.findById(lexiconId)
+        .orElseThrow(EntityNotFoundException::new);
     kbLexiconRepository.delete(lexicon);
+  }
+
+  // ===== 类别管理 =====
+  public List<DomainCategoryResponse> listCategories(boolean activeOnly) {
+    List<DomainCategory> categories = activeOnly
+        ? categoryRepository.findByStatusOrderBySortOrderAscIdAsc("ACTIVE")
+        : categoryRepository.findAllByOrderBySortOrderAscIdAsc();
+    return categories.stream().map(this::toCategoryResponse).toList();
+  }
+
+  @Transactional
+  public DomainCategoryResponse createCategory(DomainCategoryRequest request) {
+    String code = normalizeCategory(request.getCode());
+    categoryRepository.findByCode(code).ifPresent(existing -> {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别编码已存在");
+    });
+    DomainCategory category = DomainCategory.builder()
+        .code(code)
+        .name(request.getName().trim())
+        .description(normalizeOptional(request.getDescription()))
+        .status(defaultIfBlank(request.getStatus(), "ACTIVE"))
+        .sortOrder(request.getSortOrder() == null ? 100 : request.getSortOrder())
+        .build();
+    return toCategoryResponse(categoryRepository.save(category));
+  }
+
+  @Transactional
+  public DomainCategoryResponse updateCategory(Long categoryId, DomainCategoryRequest request) {
+    DomainCategory category = categoryRepository.findById(categoryId).orElseThrow(EntityNotFoundException::new);
+    String code = normalizeCategory(request.getCode());
+    categoryRepository.findByCode(code).ifPresent(existing -> {
+      if (!existing.getId().equals(categoryId)) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别编码已存在");
+      }
+    });
+    category.setCode(code);
+    category.setName(request.getName().trim());
+    category.setDescription(normalizeOptional(request.getDescription()));
+    category.setStatus(defaultIfBlank(request.getStatus(), "ACTIVE"));
+    category.setSortOrder(request.getSortOrder() == null ? 100 : request.getSortOrder());
+    return toCategoryResponse(categoryRepository.save(category));
+  }
+
+  @Transactional
+  public void deleteCategory(Long categoryId) {
+    DomainCategory category = categoryRepository.findById(categoryId).orElseThrow(EntityNotFoundException::new);
+    boolean usedInGlobal = entryRepository.existsByCategoryRefId(categoryId)
+        || entryRepository.existsByCategoryIgnoreCase(category.getCode());
+    boolean usedInLocal = kbLexiconRepository.existsByCategoryRefId(categoryId)
+        || kbLexiconRepository.existsByCategoryIgnoreCase(category.getCode());
+    if (usedInGlobal || usedInLocal) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别已被词条使用，无法删除");
+    }
+    categoryRelationRepository.deleteBySourceCategoryRefIdOrTargetCategoryRefId(categoryId, categoryId);
+    categoryRepository.delete(category);
+  }
+
+  // ===== 类别关联关系管理 =====
+  public List<DomainCategoryRelationResponse> listCategoryRelations(boolean activeOnly) {
+    List<DomainCategoryRelation> rows = activeOnly
+        ? categoryRelationRepository.findByEnabledTrueOrderBySourceCategoryRefIdAscTargetCategoryRefIdAscIdAsc()
+        : categoryRelationRepository.findAllByOrderBySourceCategoryRefIdAscTargetCategoryRefIdAscIdAsc();
+
+    return rows.stream().map(this::toCategoryRelationResponse).toList();
+  }
+
+  @Transactional
+  public DomainCategoryRelationResponse createCategoryRelation(DomainCategoryRelationRequest request) {
+    DomainCategory sourceRef = findCategoryById(request.getSourceCategoryId());
+    DomainCategory targetRef = findCategoryById(request.getTargetCategoryId());
+    String source = sourceRef.getCode();
+    String target = targetRef.getCode();
+    String label = normalizeTerm(request.getRelationLabel());
+    categoryRelationRepository.findBySourceCategoryRefIdAndTargetCategoryRefIdAndRelationLabel(
+        sourceRef.getId(), targetRef.getId(), label)
+        .ifPresent(existing -> {
+          throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别关联已存在");
+        });
+    DomainCategoryRelation relation = DomainCategoryRelation.builder()
+        .sourceCategoryRef(sourceRef)
+        .targetCategoryRef(targetRef)
+        .sourceCategory(source)
+        .targetCategory(target)
+        .relationLabel(label)
+        .enabled(request.getEnabled() == null ? Boolean.TRUE : request.getEnabled())
+        .createdBy(currentUserService.getCurrentUserId())
+        .build();
+    return toCategoryRelationResponse(categoryRelationRepository.save(relation));
+  }
+
+  @Transactional
+  public DomainCategoryRelationResponse updateCategoryRelation(Long relationId, DomainCategoryRelationRequest request) {
+    DomainCategoryRelation relation = categoryRelationRepository.findById(relationId)
+        .orElseThrow(EntityNotFoundException::new);
+    DomainCategory sourceRef = findCategoryById(request.getSourceCategoryId());
+    DomainCategory targetRef = findCategoryById(request.getTargetCategoryId());
+    String source = sourceRef.getCode();
+    String target = targetRef.getCode();
+    String label = normalizeTerm(request.getRelationLabel());
+    categoryRelationRepository.findBySourceCategoryRefIdAndTargetCategoryRefIdAndRelationLabel(
+        sourceRef.getId(), targetRef.getId(), label)
+        .ifPresent(existing -> {
+          if (!existing.getId().equals(relationId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别关联已存在");
+          }
+        });
+    relation.setSourceCategoryRef(sourceRef);
+    relation.setTargetCategoryRef(targetRef);
+    relation.setSourceCategory(source);
+    relation.setTargetCategory(target);
+    relation.setRelationLabel(label);
+    relation.setEnabled(request.getEnabled() == null ? Boolean.TRUE : request.getEnabled());
+    return toCategoryRelationResponse(categoryRelationRepository.save(relation));
+  }
+
+  @Transactional
+  public void deleteCategoryRelation(Long relationId) {
+    DomainCategoryRelation relation = categoryRelationRepository.findById(relationId)
+        .orElseThrow(EntityNotFoundException::new);
+    categoryRelationRepository.delete(relation);
+  }
+
+  public Map<String, Map<String, String>> buildCategoryRelationLabelMap() {
+    Map<String, Map<String, String>> map = new LinkedHashMap<>();
+    for (DomainCategoryRelation relation : categoryRelationRepository
+        .findByEnabledTrueOrderBySourceCategoryRefIdAscTargetCategoryRefIdAscIdAsc()) {
+      String sourceCode = relation.getSourceCategoryRef() == null
+          ? relation.getSourceCategory()
+          : relation.getSourceCategoryRef().getCode();
+      String targetCode = relation.getTargetCategoryRef() == null
+          ? relation.getTargetCategory()
+          : relation.getTargetCategoryRef().getCode();
+      String source = normalizeCategory(sourceCode);
+      String target = normalizeCategory(targetCode);
+      if (source.isBlank() || target.isBlank()) {
+        continue;
+      }
+      map.computeIfAbsent(source, k -> new LinkedHashMap<>()).put(target, relation.getRelationLabel());
+    }
+    return map;
   }
 
   // ===== 新接口：全局词典包 =====
@@ -183,12 +344,14 @@ public class DomainLexiconService {
   @Transactional
   public DictionaryEntryResponse upsertPackEntry(Long packId, DictionaryEntryRequest request, String sourceType) {
     packRepository.findById(packId).orElseThrow(EntityNotFoundException::new);
-    String category = normalizeCategory(request.getCategory());
+    DomainCategory categoryRef = resolveCategory(request.getCategoryId(), request.getCategory());
+    String category = categoryRef.getCode();
     String term = normalizeTerm(request.getTerm());
 
-    DomainDictionaryEntry entry = entryRepository.findByPackIdAndCategoryAndTerm(packId, category, term)
+    DomainDictionaryEntry entry = entryRepository.findByPackIdAndCategoryRefIdAndTerm(packId, categoryRef.getId(), term)
         .orElseGet(() -> DomainDictionaryEntry.builder()
             .packId(packId)
+            .categoryRef(categoryRef)
             .category(category)
             .term(term)
             .enabled(Boolean.TRUE)
@@ -207,14 +370,16 @@ public class DomainLexiconService {
   @Transactional
   public DictionaryEntryResponse updatePackEntry(Long entryId, DictionaryEntryRequest request) {
     DomainDictionaryEntry entry = entryRepository.findById(entryId).orElseThrow(EntityNotFoundException::new);
-    String category = normalizeCategory(request.getCategory());
+    DomainCategory categoryRef = resolveCategory(request.getCategoryId(), request.getCategory());
+    String category = categoryRef.getCode();
     String term = normalizeTerm(request.getTerm());
-    entryRepository.findByPackIdAndCategoryAndTerm(entry.getPackId(), category, term)
+    entryRepository.findByPackIdAndCategoryRefIdAndTerm(entry.getPackId(), categoryRef.getId(), term)
         .ifPresent(existing -> {
           if (!existing.getId().equals(entryId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "词条已存在");
           }
         });
+    entry.setCategoryRef(categoryRef);
     entry.setCategory(category);
     entry.setTerm(term);
     entry.setStandardTerm(normalizeOptional(request.getStandardTerm()));
@@ -319,30 +484,35 @@ public class DomainLexiconService {
     Map<String, Map<String, String>> result = new LinkedHashMap<>();
 
     // 1) 先加载激活词典包（按优先级）
-    List<KnowledgeBaseDictionaryPack> bindings = kbPackRepository.findByKnowledgeBaseIdOrderByPriorityDescIdAsc(knowledgeBaseId)
+    List<KnowledgeBaseDictionaryPack> bindings = kbPackRepository
+        .findByKnowledgeBaseIdOrderByPriorityDescIdAsc(knowledgeBaseId)
         .stream().filter(KnowledgeBaseDictionaryPack::getEnabled).toList();
     List<Long> packIds = bindings.stream().map(KnowledgeBaseDictionaryPack::getPackId).toList();
     for (DomainDictionaryEntry entry : entryRepository.findByPackIdInAndEnabledTrue(packIds)) {
-      mergeAlias(result, entry.getCategory(), entry.getTerm(), entry.getStandardTerm());
+      String category = entry.getCategoryRef() == null ? entry.getCategory() : entry.getCategoryRef().getCode();
+      mergeAlias(result, category, entry.getTerm(), entry.getStandardTerm());
     }
 
     // 2) 再加载知识库本地词条（作为补充覆盖）
     for (KnowledgeBaseDomainLexicon entry : kbLexiconRepository.findByKnowledgeBaseIdAndEnabledTrue(knowledgeBaseId)) {
-      mergeAlias(result, entry.getCategory(), entry.getTerm(), entry.getStandardTerm());
+      String category = entry.getCategoryRef() == null ? entry.getCategory() : entry.getCategoryRef().getCode();
+      mergeAlias(result, category, entry.getTerm(), entry.getStandardTerm());
     }
     return result;
   }
 
   private List<DictionaryEntryRequest> parseJson(String raw) {
     try {
-      List<Map<String, Object>> rows = objectMapper.readValue(raw, new TypeReference<>() {});
+      List<Map<String, Object>> rows = objectMapper.readValue(raw, new TypeReference<>() {
+      });
       List<DictionaryEntryRequest> result = new ArrayList<>();
       for (Map<String, Object> row : rows) {
         DictionaryEntryRequest req = new DictionaryEntryRequest();
         req.setCategory(Objects.toString(row.get("category"), ""));
         req.setTerm(Objects.toString(row.get("term"), ""));
         req.setStandardTerm(row.get("standardTerm") == null ? null : Objects.toString(row.get("standardTerm"), null));
-        req.setEnabled(row.get("enabled") == null ? Boolean.TRUE : Boolean.valueOf(Objects.toString(row.get("enabled"))));
+        req.setEnabled(
+            row.get("enabled") == null ? Boolean.TRUE : Boolean.valueOf(Objects.toString(row.get("enabled"))));
         result.add(req);
       }
       return result;
@@ -385,6 +555,9 @@ public class DomainLexiconService {
 
   private void mergeAlias(Map<String, Map<String, String>> target, String category, String term, String standardTerm) {
     String c = normalizeCategory(category);
+    if (categoryRepository.findByCode(c).isEmpty()) {
+      return;
+    }
     String t = normalizeTerm(term);
     String standard = normalizeOptional(standardTerm);
     String canonical = standard == null ? t : standard;
@@ -397,6 +570,29 @@ public class DomainLexiconService {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "category不能为空");
     }
     return category.trim().toUpperCase(Locale.ROOT);
+  }
+
+  private DomainCategory findCategoryByCode(String code) {
+    return categoryRepository.findByCode(code)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别不存在: " + code));
+  }
+
+  private DomainCategory findCategoryById(Long id) {
+    if (id == null) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "categoryId不能为空");
+    }
+    return categoryRepository.findById(id)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "类别不存在: " + id));
+  }
+
+  private DomainCategory resolveCategory(Long categoryId, String categoryCode) {
+    if (categoryId != null) {
+      return findCategoryById(categoryId);
+    }
+    if (categoryCode != null && !categoryCode.isBlank()) {
+      return findCategoryByCode(normalizeCategory(categoryCode));
+    }
+    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "categoryId不能为空");
   }
 
   private String normalizeTerm(String term) {
@@ -431,11 +627,43 @@ public class DomainLexiconService {
         .build();
   }
 
+  private DomainCategoryResponse toCategoryResponse(DomainCategory category) {
+    return DomainCategoryResponse.builder()
+        .id(category.getId())
+        .code(category.getCode())
+        .name(category.getName())
+        .description(category.getDescription())
+        .status(category.getStatus())
+        .sortOrder(category.getSortOrder())
+        .createdAt(category.getCreatedAt())
+        .build();
+  }
+
+  private DomainCategoryRelationResponse toCategoryRelationResponse(DomainCategoryRelation relation) {
+    DomainCategory source = relation.getSourceCategoryRef();
+    DomainCategory target = relation.getTargetCategoryRef();
+    return DomainCategoryRelationResponse.builder()
+        .id(relation.getId())
+        .sourceCategoryId(source == null ? null : source.getId())
+        .sourceCategory(source == null ? relation.getSourceCategory() : source.getCode())
+        .sourceCategoryName(source == null ? null : source.getName())
+        .targetCategoryId(target == null ? null : target.getId())
+        .targetCategory(target == null ? relation.getTargetCategory() : target.getCode())
+        .targetCategoryName(target == null ? null : target.getName())
+        .relationLabel(relation.getRelationLabel())
+        .enabled(relation.getEnabled())
+        .createdAt(relation.getCreatedAt())
+        .build();
+  }
+
   private DictionaryEntryResponse toEntryResponse(DomainDictionaryEntry entry) {
+    DomainCategory c = entry.getCategoryRef();
     return DictionaryEntryResponse.builder()
         .id(entry.getId())
         .packId(entry.getPackId())
-        .category(entry.getCategory())
+        .categoryId(c == null ? null : c.getId())
+        .category(c == null ? entry.getCategory() : c.getCode())
+        .categoryName(c == null ? null : c.getName())
         .term(entry.getTerm())
         .standardTerm(entry.getStandardTerm())
         .enabled(entry.getEnabled())
@@ -445,10 +673,13 @@ public class DomainLexiconService {
   }
 
   private KnowledgeLexiconResponse toKbLexiconResponse(KnowledgeBaseDomainLexicon lexicon) {
+    DomainCategory c = lexicon.getCategoryRef();
     return KnowledgeLexiconResponse.builder()
         .id(lexicon.getId())
         .knowledgeBaseId(lexicon.getKnowledgeBase().getId())
-        .category(lexicon.getCategory())
+        .categoryId(c == null ? null : c.getId())
+        .category(c == null ? lexicon.getCategory() : c.getCode())
+        .categoryName(c == null ? null : c.getName())
         .term(lexicon.getTerm())
         .standardTerm(lexicon.getStandardTerm())
         .enabled(lexicon.getEnabled())

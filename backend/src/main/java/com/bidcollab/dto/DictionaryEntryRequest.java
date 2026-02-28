@@ -1,13 +1,13 @@
 package com.bidcollab.dto;
 
-import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
+import jakarta.validation.constraints.NotBlank;
 
 @Data
 public class DictionaryEntryRequest {
-  @NotBlank
-  private String category;
+  private Long categoryId;
 
+  private String category;
   @NotBlank
   private String term;
 

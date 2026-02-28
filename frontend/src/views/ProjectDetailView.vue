@@ -137,14 +137,14 @@ const docPage = ref(1)
 const docPageSize = ref(10)
 const exportPage = ref(1)
 const exportPageSize = ref(10)
-const exportingDocId = ref<number | null>(null)
+const exportingDocId = ref<string | number | null>(null)
 
 const docForm = reactive({
   name: '',
   docType: ''
 })
 const exportForm = reactive({
-  documentId: 0,
+  documentId: "",
   documentName: '',
   format: 'docx',
   versionNo: ''
@@ -159,7 +159,7 @@ const pagedExports = computed(() => {
 })
 
 const load = async () => {
-  const id = Number(route.params.id)
+  const id = String(route.params.id)
   const projectRes = await api.getProject(id)
   project.value = projectRes.data
   const docsRes = await api.listDocuments(id)
@@ -197,7 +197,7 @@ const loadExportsByDocuments = async () => {
 
 const createDocument = async () => {
   try {
-    const id = Number(route.params.id)
+    const id = String(route.params.id)
     await api.createDocument(id, docForm)
     ElMessage.success('创建成功')
     showCreate.value = false

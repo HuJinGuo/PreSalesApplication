@@ -247,6 +247,42 @@ CREATE TABLE IF NOT EXISTS ai_token_usage (
   INDEX idx_ai_token_usage_created_by (created_by)
 );
 
+CREATE TABLE IF NOT EXISTS ai_call_trace (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  usage_date DATE NOT NULL,
+  trace_id VARCHAR(64) NOT NULL,
+  request_type VARCHAR(32) NOT NULL,
+  provider VARCHAR(32) NOT NULL,
+  model_name VARCHAR(128) NOT NULL,
+  scene VARCHAR(64) NULL,
+  prompt_tokens INT NOT NULL DEFAULT 0,
+  completion_tokens INT NOT NULL DEFAULT 0,
+  total_tokens INT NOT NULL DEFAULT 0,
+  latency_ms BIGINT NOT NULL DEFAULT 0,
+  is_estimated TINYINT(1) NOT NULL DEFAULT 1,
+  is_success TINYINT(1) NOT NULL DEFAULT 1,
+  http_status INT NULL,
+  error_code VARCHAR(64) NULL,
+  error_message TEXT NULL,
+  vendor_request_id VARCHAR(128) NULL,
+  knowledge_base_id BIGINT NULL,
+  knowledge_document_id BIGINT NULL,
+  section_id BIGINT NULL,
+  ai_task_id BIGINT NULL,
+  retry_count INT NOT NULL DEFAULT 0,
+  request_payload MEDIUMTEXT NULL,
+  response_payload MEDIUMTEXT NULL,
+  created_by BIGINT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_ai_call_trace_date (usage_date),
+  INDEX idx_ai_call_trace_trace_id (trace_id),
+  INDEX idx_ai_call_trace_doc (knowledge_document_id),
+  INDEX idx_ai_call_trace_kb (knowledge_base_id),
+  INDEX idx_ai_call_trace_success (is_success),
+  INDEX idx_ai_call_trace_provider_model (provider, model_name)
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_base (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   name VARCHAR(255) NOT NULL,
@@ -439,9 +475,47 @@ CREATE TABLE IF NOT EXISTS knowledge_chunk_term (
 -- -- CREATE INDEX IF NOT EXISTS idx_kct_kb_doc_type_key ON knowledge_chunk_term (knowledge_base_id, knowledge_document_id, term_type, term_key);
 -- -- CREATE INDEX IF NOT EXISTS idx_kct_kb_type_key ON knowledge_chunk_term (knowledge_base_id, term_type, term_key);
 
+CREATE TABLE IF NOT EXISTS knowledge_graph_node (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  knowledge_base_id BIGINT NOT NULL,
+  knowledge_document_id BIGINT NOT NULL,
+  knowledge_chunk_id BIGINT NOT NULL,
+  node_key VARCHAR(255) NOT NULL,
+  node_name VARCHAR(255) NOT NULL,
+  node_type VARCHAR(64) NOT NULL,
+  frequency INT NOT NULL,
+  source VARCHAR(32) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_kgn_base FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_base(id),
+  CONSTRAINT fk_kgn_doc FOREIGN KEY (knowledge_document_id) REFERENCES knowledge_document(id),
+  CONSTRAINT fk_kgn_chunk FOREIGN KEY (knowledge_chunk_id) REFERENCES knowledge_chunk(id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_graph_edge (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  knowledge_base_id BIGINT NOT NULL,
+  knowledge_document_id BIGINT NOT NULL,
+  knowledge_chunk_id BIGINT NOT NULL,
+  source_node_key VARCHAR(255) NOT NULL,
+  source_node_name VARCHAR(255) NOT NULL,
+  target_node_key VARCHAR(255) NOT NULL,
+  target_node_name VARCHAR(255) NOT NULL,
+  relation_type VARCHAR(64) NOT NULL,
+  relation_name VARCHAR(128) NOT NULL,
+  frequency INT NOT NULL,
+  source VARCHAR(32) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_kge_base FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_base(id),
+  CONSTRAINT fk_kge_doc FOREIGN KEY (knowledge_document_id) REFERENCES knowledge_document(id),
+  CONSTRAINT fk_kge_chunk FOREIGN KEY (knowledge_chunk_id) REFERENCES knowledge_chunk(id)
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_base_domain_lexicon (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   knowledge_base_id BIGINT NOT NULL,
+  category_id BIGINT NULL,
   category VARCHAR(64) NOT NULL,
   term VARCHAR(255) NOT NULL,
   standard_term VARCHAR(255),
@@ -614,9 +688,35 @@ CREATE TABLE IF NOT EXISTS domain_dictionary_pack (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS domain_category (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  code VARCHAR(64) NOT NULL UNIQUE,
+  name VARCHAR(128) NOT NULL,
+  description VARCHAR(500),
+  status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+  sort_order INT NOT NULL DEFAULT 100,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS domain_category_relation (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  source_category_id BIGINT NULL,
+  target_category_id BIGINT NULL,
+  source_category VARCHAR(64) NOT NULL,
+  target_category VARCHAR(64) NOT NULL,
+  relation_label VARCHAR(64) NOT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT uk_domain_category_relation UNIQUE (source_category, target_category, relation_label)
+);
+
 CREATE TABLE IF NOT EXISTS domain_dictionary_entry (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   pack_id BIGINT NOT NULL,
+  category_id BIGINT NULL,
   category VARCHAR(64) NOT NULL,
   term VARCHAR(255) NOT NULL,
   standard_term VARCHAR(255),
@@ -709,6 +809,199 @@ INSERT IGNORE INTO domain_dictionary_pack (id, code, name, scope_type, status, d
 VALUES
   (1, 'ENV_COMMON', '环保行业词典', 'GLOBAL', 'ACTIVE', '环境监测行业通用术语', 1),
   (2, 'IT_COMMON', '通用IT架构词典', 'GLOBAL', 'ACTIVE', 'IT系统架构术语与同义词', 1);
+
+INSERT IGNORE INTO domain_category (id, code, name, description, status, sort_order)
+VALUES
+  (1, 'POLLUTANT', '污染物', '气态/颗粒物/有机污染物等监测对象', 'ACTIVE', 10),
+  (2, 'INSTRUMENT', '仪器设备', '监测仪、采样器、分析仪等', 'ACTIVE', 20),
+  (3, 'SITE', '点位区域', '站点、断面、区域、园区等', 'ACTIVE', 30),
+  (4, 'STANDARD', '标准规范', '国家/行业/地方标准与技术规范', 'ACTIVE', 40),
+  (5, 'FAULT', '故障异常', '漂移、堵塞、失真、异常告警', 'ACTIVE', 50),
+  (6, 'ACTION', '处置动作', '检修、清洗、标定、更换等', 'ACTIVE', 60),
+  (7, 'PARAMETER', '参数指标', '浓度、温度、流速、COD等监测参数', 'ACTIVE', 70),
+  (8, 'PROCESS', '工艺流程', '采样、传输、分析、治理流程', 'ACTIVE', 80),
+  (9, 'COMPONENT', '组件部件', '泵、阀、探头、滤膜等', 'ACTIVE', 90),
+  (10, 'CAUSE', '原因因素', '工况、环境、供电、通信等诱因', 'ACTIVE', 100);
+
+SET @col_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_dictionary_entry'
+    AND COLUMN_NAME = 'category_id'
+);
+SET @sql = IF(@col_exists = 0,
+  'ALTER TABLE domain_dictionary_entry ADD COLUMN category_id BIGINT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'knowledge_base_domain_lexicon'
+    AND COLUMN_NAME = 'category_id'
+);
+SET @sql = IF(@col_exists = 0,
+  'ALTER TABLE knowledge_base_domain_lexicon ADD COLUMN category_id BIGINT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_category_relation'
+    AND COLUMN_NAME = 'source_category_id'
+);
+SET @sql = IF(@col_exists = 0,
+  'ALTER TABLE domain_category_relation ADD COLUMN source_category_id BIGINT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @col_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_category_relation'
+    AND COLUMN_NAME = 'target_category_id'
+);
+SET @sql = IF(@col_exists = 0,
+  'ALTER TABLE domain_category_relation ADD COLUMN target_category_id BIGINT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+UPDATE domain_dictionary_entry e
+JOIN domain_category c ON UPPER(TRIM(e.category)) = c.code
+SET e.category_id = c.id
+WHERE e.category_id IS NULL;
+
+UPDATE knowledge_base_domain_lexicon e
+JOIN domain_category c ON UPPER(TRIM(e.category)) = c.code
+SET e.category_id = c.id
+WHERE e.category_id IS NULL;
+
+UPDATE domain_category_relation r
+JOIN domain_category sc ON UPPER(TRIM(r.source_category)) = sc.code
+JOIN domain_category tc ON UPPER(TRIM(r.target_category)) = tc.code
+SET r.source_category_id = sc.id,
+    r.target_category_id = tc.id
+WHERE r.source_category_id IS NULL OR r.target_category_id IS NULL;
+
+SET @fk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_dictionary_entry'
+    AND CONSTRAINT_NAME = 'fk_domain_entry_category'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+SET @sql = IF(@fk_exists = 0,
+  'ALTER TABLE domain_dictionary_entry ADD CONSTRAINT fk_domain_entry_category FOREIGN KEY (category_id) REFERENCES domain_category(id)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @fk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'knowledge_base_domain_lexicon'
+    AND CONSTRAINT_NAME = 'fk_kb_lexicon_category'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+SET @sql = IF(@fk_exists = 0,
+  'ALTER TABLE knowledge_base_domain_lexicon ADD CONSTRAINT fk_kb_lexicon_category FOREIGN KEY (category_id) REFERENCES domain_category(id)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @fk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_category_relation'
+    AND CONSTRAINT_NAME = 'fk_domain_relation_source'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+SET @sql = IF(@fk_exists = 0,
+  'ALTER TABLE domain_category_relation ADD CONSTRAINT fk_domain_relation_source FOREIGN KEY (source_category_id) REFERENCES domain_category(id)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @fk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_category_relation'
+    AND CONSTRAINT_NAME = 'fk_domain_relation_target'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+SET @sql = IF(@fk_exists = 0,
+  'ALTER TABLE domain_category_relation ADD CONSTRAINT fk_domain_relation_target FOREIGN KEY (target_category_id) REFERENCES domain_category(id)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+INSERT IGNORE INTO domain_category_relation (id, source_category, target_category, relation_label, enabled, created_by)
+VALUES
+  (1, 'INSTRUMENT', 'POLLUTANT', '监测', 1, 1),
+  (2, 'INSTRUMENT', 'SITE', '部署于', 1, 1),
+  (3, 'FAULT', 'COMPONENT', '发生于', 1, 1),
+  (4, 'FAULT', 'CAUSE', '由...导致', 1, 1),
+  (5, 'ACTION', 'FAULT', '处置', 1, 1),
+  (6, 'PROCESS', 'STANDARD', '遵循', 1, 1),
+  (7, 'PARAMETER', 'INSTRUMENT', '配置于', 1, 1);
+
+UPDATE domain_category_relation r
+JOIN domain_category sc ON UPPER(TRIM(r.source_category)) = sc.code
+JOIN domain_category tc ON UPPER(TRIM(r.target_category)) = tc.code
+SET r.source_category_id = sc.id,
+    r.target_category_id = tc.id
+WHERE r.source_category_id IS NULL OR r.target_category_id IS NULL;
+
+SET @uk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_dictionary_entry'
+    AND CONSTRAINT_NAME = 'uk_domain_entry_ref'
+    AND CONSTRAINT_TYPE = 'UNIQUE'
+);
+SET @sql = IF(@uk_exists = 0,
+  'ALTER TABLE domain_dictionary_entry ADD CONSTRAINT uk_domain_entry_ref UNIQUE (pack_id, category_id, term)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @uk_exists = (
+  SELECT COUNT(*)
+  FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'domain_category_relation'
+    AND CONSTRAINT_NAME = 'uk_domain_category_relation_ref'
+    AND CONSTRAINT_TYPE = 'UNIQUE'
+);
+SET @sql = IF(@uk_exists = 0,
+  'ALTER TABLE domain_category_relation ADD CONSTRAINT uk_domain_category_relation_ref UNIQUE (source_category_id, target_category_id, relation_label)',
+  'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 SET @idx_exam_share_exists := (
   SELECT COUNT(1)

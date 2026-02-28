@@ -8,8 +8,9 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface KnowledgeBaseDomainLexiconRepository extends JpaRepository<KnowledgeBaseDomainLexicon, Long> {
   List<KnowledgeBaseDomainLexicon> findByKnowledgeBaseIdOrderByCategoryAscTermAsc(Long knowledgeBaseId);
   List<KnowledgeBaseDomainLexicon> findByKnowledgeBaseIdAndEnabledTrue(Long knowledgeBaseId);
-  Optional<KnowledgeBaseDomainLexicon> findByKnowledgeBaseIdAndCategoryAndTerm(
-      Long knowledgeBaseId, String category, String term);
+  Optional<KnowledgeBaseDomainLexicon> findByKnowledgeBaseIdAndCategoryRefIdAndTerm(
+      Long knowledgeBaseId, Long categoryId, String term);
+  boolean existsByCategoryRefId(Long categoryId);
+  boolean existsByCategoryIgnoreCase(String category);
   void deleteByKnowledgeBaseId(Long knowledgeBaseId);
 }
-

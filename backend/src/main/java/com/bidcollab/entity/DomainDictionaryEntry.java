@@ -2,6 +2,9 @@ package com.bidcollab.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -19,6 +22,10 @@ import lombok.Setter;
 public class DomainDictionaryEntry extends BaseEntity {
   @Column(name = "pack_id", nullable = false)
   private Long packId;
+
+  @ManyToOne(fetch = FetchType.EAGER)
+  @JoinColumn(name = "category_id", nullable = false)
+  private DomainCategory categoryRef;
 
   @Column(nullable = false, length = 64)
   private String category;

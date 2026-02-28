@@ -6,7 +6,7 @@ import lombok.Data;
 
 @Data
 @Builder
-public class AiTokenUsageRecordItem {
+public class AiTokenUsageRecordDetailResponse {
   private Long id;
   private String traceId;
   private Instant createdAt;
@@ -23,10 +23,13 @@ public class AiTokenUsageRecordItem {
   private Integer httpStatus;
   private String errorCode;
   private String errorMessage;
+  private String vendorRequestId;
+  private Integer retryCount;
   private Long knowledgeBaseId;
   private Long knowledgeDocumentId;
   private Long sectionId;
   private Long aiTaskId;
-  private Integer retryCount;
+  private String requestPayload;
+  private String responsePayload;
   private Long createdBy;
 }
