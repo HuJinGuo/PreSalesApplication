@@ -37,6 +37,8 @@ app:
     storage-dir: /tmp/bid-knowledge-files
     embedding-concurrency: 6
     reindex-concurrency: 2
+    # 词典启用：图谱实体关系基于人工领域词典抽取（企业可控）
+    domain-lexicon-enabled: true
   vector:
     provider: milvus
     milvus:
@@ -54,11 +56,14 @@ app:
     embedding-provider: openai
     chat-model: nvidia/nemotron-3-nano-30b-a3b
     # chat-model: z-ai/glm5
-    embedding-model: nvidia/nv-embedqa-e5-v5
+    embedding-model: baai/bge-m3
     keyword-model: moonshotai/kimi-k2.5
     openai:
       base-url: https://integrate.api.nvidia.com/v1
       api-key: 
+      api-keys:  
+        - 
+        -
     alibaba:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api-key: 
@@ -73,12 +78,20 @@ app:
       api-key:
   security:
     jwt:
-      secret: "change-this-to-a-long-random-string"
+      secret: "hasd1zas12adas"
       expire-minutes: 720
   export:
     base-dir: /tmp/bid-doc-downloads
   exam:
     repeat-strategy: ALL
+  agent:
+    runtime:
+      max-iterations-standard: 14
+      max-iterations-fast-draft: 10
+      tool-timeout-ms: 90000
+      tool-max-retries: 1
+      tool-retry-backoff-ms: 800
+      tool-concurrency: 6
 
 logging:
   level:

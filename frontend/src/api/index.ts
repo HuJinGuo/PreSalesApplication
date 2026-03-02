@@ -106,6 +106,15 @@ export const api = {
   aiAutoWriteDocument(data: any) {
     return http.post('/ai/document-auto-write', data)
   },
+  createAgentTask(data: any) {
+    return http.post('/agent-tasks', data)
+  },
+  listAgentTasks(documentId: number | string, params: any = {}) {
+    return http.get('/agent-tasks', { params: { documentId, ...params } })
+  },
+  getAgentTask(id: number | string) {
+    return http.get(`/agent-tasks/${id}`)
+  },
   getAiTokenUsageDaily(params?: any) {
     return http.get('/ai/token-usage/daily', { params })
   },

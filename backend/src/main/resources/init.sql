@@ -225,6 +225,55 @@ CREATE TABLE IF NOT EXISTS ai_task (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS agent_workflow_task (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  document_id BIGINT NOT NULL,
+  section_id BIGINT NULL,
+  knowledge_base_id BIGINT NULL,
+  run_mode VARCHAR(32) NOT NULL,
+  requirement TEXT NULL,
+  project_params LONGTEXT NULL,
+  max_iterations INT NOT NULL DEFAULT 10,
+  current_iteration INT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL,
+  final_summary TEXT NULL,
+  error_message TEXT NULL,
+  started_at TIMESTAMP NULL,
+  finished_at TIMESTAMP NULL,
+  created_by BIGINT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_agent_workflow_task_doc (document_id),
+  INDEX idx_agent_workflow_task_status (status),
+  INDEX idx_agent_workflow_task_created_at (created_at)
+);
+
+CREATE TABLE IF NOT EXISTS agent_workflow_step (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id BIGINT NOT NULL,
+  iteration_no INT NOT NULL DEFAULT 0,
+  step_code VARCHAR(64) NOT NULL,
+  step_name VARCHAR(128) NOT NULL,
+  step_type VARCHAR(32) NOT NULL,
+  tool_name VARCHAR(64) NULL,
+  status VARCHAR(16) NOT NULL,
+  reason TEXT NULL,
+  args_json LONGTEXT NULL,
+  observation LONGTEXT NULL,
+  error_message TEXT NULL,
+  idempotency_key VARCHAR(128) NULL,
+  retry_count INT NOT NULL DEFAULT 0,
+  timeout_ms BIGINT NOT NULL DEFAULT 0,
+  started_at TIMESTAMP NULL,
+  finished_at TIMESTAMP NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_agent_workflow_step_task FOREIGN KEY (task_id) REFERENCES agent_workflow_task(id),
+  INDEX idx_agent_workflow_step_task (task_id, iteration_no),
+  INDEX idx_agent_workflow_step_status (status),
+  INDEX idx_agent_workflow_step_idempotency (task_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS ai_token_usage (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   usage_date DATE NOT NULL,

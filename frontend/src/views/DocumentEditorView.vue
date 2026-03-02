@@ -3,6 +3,8 @@
     <div class="card header">
       <div class="header-title">文档编辑：{{ document?.name }}</div>
       <div class="actions">
+        <el-button type="primary" @click="openAutoWriteDialog">AI自动编写全文</el-button>
+        <el-button @click="showAutoWriteProgressDialog = true">查看编写进度</el-button>
         <el-button @click="back">返回项目</el-button>
         <el-button type="primary" @click="refresh">刷新</el-button>
       </div>
@@ -87,8 +89,6 @@
           <div class="footer-actions footer-actions-top">
             <!-- <el-button @click="openAssetDialog">沉淀为资产</el-button> -->
             <el-button type="success" @click="aiRewrite">AI改写</el-button>
-            <el-button type="primary" @click="openAutoWriteDialog">AI自动编写全文</el-button>
-            <el-button v-if="autoWriteTaskId" @click="showAutoWriteProgressDialog = true">查看编写进度</el-button>
             <!-- <el-button type="warning" @click="submitReview">提交审核</el-button> -->
           </div>
           <Toolbar class="editor-toolbar" :editor="editorRef" :default-config="toolbarConfig" mode="default" />
@@ -261,13 +261,24 @@
 
     <el-dialog v-model="showAutoWriteDialog" title="AI自动编写全文" width="560px">
       <el-form :model="autoWriteForm" label-width="120px">
+        <el-form-item label="运行模式">
+          <el-select v-model="autoWriteForm.runMode" style="width: 100%">
+            <el-option label="STANDARD（先大纲后正文）" value="STANDARD" />
+            <el-option label="FAST_DRAFT（整篇后拆章）" value="FAST_DRAFT" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="知识库">
           <el-select v-model="autoWriteForm.knowledgeBaseId" style="width: 100%" clearable placeholder="可不选（仅按结构生成）">
             <el-option v-for="kb in autoWriteKnowledgeBases" :key="kb.id" :label="kb.name" :value="kb.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="覆盖已有内容">
-          <el-switch v-model="autoWriteForm.overwriteExisting" />
+        <el-form-item label="写作需求">
+          <el-input
+            v-model="autoWriteForm.requirement"
+            type="textarea"
+            :rows="4"
+            placeholder="例如：输出环境监测投标技术方案，突出实施路径、风险控制和交付计划。"
+          />
         </el-form-item>
         <el-form-item label="项目补充参数">
           <el-input
@@ -301,9 +312,44 @@
           <span>成功：{{ autoWriteProgress.success }}</span>
           <span>失败：{{ autoWriteProgress.failed }}</span>
         </div>
-        <el-table :data="autoWriteProgress.steps" size="small" height="340">
-          <el-table-column prop="sectionId" label="章节ID" width="90" />
-          <el-table-column prop="title" label="章节标题" min-width="240" />
+        <div class="progress-block-title">当前文档最近任务</div>
+        <el-table
+          :data="autoWriteTasks"
+          size="small"
+          height="180"
+          v-loading="autoWriteTasksLoading"
+          @row-click="selectAutoWriteTask"
+        >
+          <el-table-column label="任务ID" width="180">
+            <template #default="{ row }">
+              <span :class="['task-id-text', { active: String(row.id) === autoWriteTaskId }]">#{{ row.id }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="runMode" label="模式" width="120" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'SUCCESS' ? 'success' : row.status === 'FAILED' ? 'danger' : 'info'" size="small">
+                {{ row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="步骤进度" width="140">
+            <template #default="{ row }">
+              {{ row.successSteps || 0 }}/{{ row.totalSteps || 0 }}
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" min-width="180">
+            <template #default="{ row }">
+              {{ formatDateTime(row.createdAt) }}
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="progress-block-title" style="margin-top: 12px;">任务步骤详情</div>
+        <el-table :data="autoWriteProgress.steps" size="small" height="220">
+          <el-table-column prop="id" label="Step ID" width="130" show-overflow-tooltip />
+          <el-table-column prop="name" label="步骤名称" min-width="200" />
+          <el-table-column prop="type" label="类型" width="140" show-overflow-tooltip />
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="row.status === 'SUCCESS' ? 'success' : row.status === 'FAILED' ? 'danger' : 'info'" size="small">
@@ -346,6 +392,17 @@ type CitationRow = {
   chunkIds: string[]
   context: string
 }
+type AutoWriteTaskRow = {
+  id: string
+  runMode: string
+  status: string
+  totalSteps: number
+  successSteps: number
+  failedSteps: number
+  createdAt?: string
+  finishedAt?: string
+  errorMessage?: string
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -365,13 +422,15 @@ const showAutoWriteProgressDialog = ref(false)
 const autoWriting = ref(false)
 const autoWriteKnowledgeBases = ref<any[]>([])
 const autoWriteTaskTimer = ref<number | null>(null)
-const autoWriteTaskId = ref<number | null>(null)
+const autoWriteTaskId = ref<string | null>(null)
 const autoWriteTaskStatus = ref<string>('PENDING')
+const autoWriteTasksLoading = ref(false)
+const autoWriteTasks = ref<AutoWriteTaskRow[]>([])
 const autoWriteProgress = reactive({
   total: 0,
   success: 0,
   failed: 0,
-  steps: [] as Array<{ sectionId?: number; title?: string; status?: string; error?: string }>
+  steps: [] as Array<{ id?: string; name?: string; type?: string; status?: string; error?: string }>
 })
 const templates = ref<any[]>([])
 const rightTab = ref<'image' | 'citation'>('image')
@@ -467,9 +526,10 @@ const assetForm = reactive({
 const templateApplyForm = reactive({ templateId: undefined as number | undefined })
 const templateSaveForm = reactive({ name: '', description: '' })
 const autoWriteForm = reactive({
+  runMode: 'STANDARD' as 'STANDARD' | 'FAST_DRAFT',
   knowledgeBaseId: undefined as number | undefined,
+  requirement: '',
   projectParams: '',
-  overwriteExisting: true
 })
 const centerRenameEditing = ref(false)
 const centerRenameTitle = ref('')
@@ -930,6 +990,8 @@ const openAutoWriteDialog = async () => {
     const { data } = await api.listKnowledgeBases()
     autoWriteKnowledgeBases.value = data || []
   }
+  autoWriteForm.runMode = 'STANDARD'
+  autoWriteForm.requirement = ''
   autoWriteForm.projectParams = JSON.stringify({ projectId: document.value?.projectId, documentId: document.value?.id })
 }
 const clearAutoWriteTimer = () => {
@@ -960,6 +1022,72 @@ const applyAutoWriteProgress = (task: any) => {
     // ignore invalid payload
   }
 }
+const formatDateTime = (val?: string) => {
+  if (!val) return '-'
+  const d = new Date(val)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleString()
+}
+const loadAutoWriteTasks = async () => {
+  if (!document.value?.id) return
+  autoWriteTasksLoading.value = true
+  try {
+    const { data } = await api.listAgentTasks(document.value.id, { limit: 12 })
+    autoWriteTasks.value = (data || []).map((item: any) => ({
+      id: String(item.id),
+      runMode: item.runMode || '-',
+      status: item.status || 'PENDING',
+      totalSteps: Number(item.totalSteps || 0),
+      successSteps: Number(item.successSteps || 0),
+      failedSteps: Number(item.failedSteps || 0),
+      createdAt: item.createdAt,
+      finishedAt: item.finishedAt,
+      errorMessage: item.errorMessage
+    }))
+    if (!autoWriteTaskId.value && autoWriteTasks.value.length) {
+      autoWriteTaskId.value = autoWriteTasks.value[0].id
+    }
+  } finally {
+    autoWriteTasksLoading.value = false
+  }
+}
+const selectAutoWriteTask = async (row: AutoWriteTaskRow) => {
+  if (!row?.id) return
+  clearAutoWriteTimer()
+  autoWriteTaskId.value = String(row.id)
+  const status = await fetchAgentTaskProgress(autoWriteTaskId.value)
+  if (status === 'RUNNING') {
+    startAgentTaskPolling(autoWriteTaskId.value)
+  }
+}
+const fetchAgentTaskProgress = async (taskId: string) => {
+  const taskRes = await api.getAgentTask(taskId)
+  const status = taskRes.data?.status
+  applyAutoWriteProgress(taskRes.data)
+  return status
+}
+const startAgentTaskPolling = (taskId: string) => {
+  clearAutoWriteTimer()
+  autoWriteTaskTimer.value = window.setInterval(async () => {
+    try {
+      const status = await fetchAgentTaskProgress(taskId)
+      if (status === 'RUNNING') return
+      clearAutoWriteTimer()
+      autoWriting.value = false
+      if (status === 'SUCCESS') {
+        ElMessage.success('AI 自动编写完成')
+      } else {
+        ElMessage.error('AI 自动编写失败')
+      }
+      await loadAutoWriteTasks()
+      await load()
+    } catch {
+      clearAutoWriteTimer()
+      autoWriting.value = false
+      autoWriteTaskStatus.value = 'FAILED'
+    }
+  }, 2500)
+}
 const startAutoWrite = async () => {
   if (!document.value?.id) return
   if (dirty.value) {
@@ -969,48 +1097,45 @@ const startAutoWrite = async () => {
   try {
     autoWriting.value = true
     resetAutoWriteProgress()
-    const { data } = await api.aiAutoWriteDocument({
+    const { data } = await api.createAgentTask({
       documentId: document.value.id,
+      runMode: autoWriteForm.runMode,
       knowledgeBaseId: autoWriteForm.knowledgeBaseId,
-      projectParams: autoWriteForm.projectParams,
-      overwriteExisting: autoWriteForm.overwriteExisting
+      requirement: autoWriteForm.requirement,
+      projectParams: autoWriteForm.projectParams
     })
-    const taskId = data?.id
+    const taskId = String(data?.id || '')
     if (!taskId) {
       ElMessage.error('任务创建失败')
       return
     }
-    autoWriteTaskId.value = Number(taskId)
+    autoWriteTaskId.value = taskId
     ElMessage.success(`已启动自动编写任务 #${taskId}`)
     showAutoWriteDialog.value = false
     showAutoWriteProgressDialog.value = true
-    clearAutoWriteTimer()
-    autoWriteTaskTimer.value = window.setInterval(async () => {
-      try {
-        const taskRes = await api.getAiTask(taskId)
-        const status = taskRes.data?.status
-        applyAutoWriteProgress(taskRes.data)
-        if (status === 'RUNNING') return
-        clearAutoWriteTimer()
-        autoWriting.value = false
-        if (status === 'SUCCESS') {
-          ElMessage.success('AI 自动编写完成')
-        } else {
-          ElMessage.error(taskRes.data?.errorMessage || 'AI 自动编写失败')
-        }
-        await load()
-      } catch (e) {
-        clearAutoWriteTimer()
-        autoWriting.value = false
-        autoWriteTaskStatus.value = 'FAILED'
-      }
-    }, 2500)
+    await loadAutoWriteTasks()
+    fetchAgentTaskProgress(taskId).catch(() => undefined)
+    startAgentTaskPolling(taskId)
   } catch {
     autoWriting.value = false
     autoWriteTaskStatus.value = 'FAILED'
     ElMessage.error('启动自动编写失败')
   }
 }
+
+watch([() => showAutoWriteProgressDialog.value, () => autoWriteTaskId.value], async ([visible, taskId]) => {
+  if (!visible) return
+  try {
+    await loadAutoWriteTasks()
+    if (!taskId) return
+    const status = await fetchAgentTaskProgress(taskId)
+    if (status === 'RUNNING' && autoWriteTaskTimer.value === null) {
+      startAgentTaskPolling(taskId)
+    }
+  } catch {
+    // ignore
+  }
+})
 const submitReview = async () => {
   if (!currentSection.value) return
   if (dirty.value) {
@@ -1220,6 +1345,22 @@ onBeforeUnmount(() => {
 .content,
 .versions {
   min-width: 0;
+}
+
+.progress-block-title {
+  margin: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.task-id-text {
+  color: #334155;
+}
+
+.task-id-text.active {
+  color: #2563eb;
+  font-weight: 600;
 }
 
 .tree {
